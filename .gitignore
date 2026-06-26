@@ -1,0 +1,123 @@
+## .NET 10 .gitignore
+
+# ─── Build output ────────────────────────────────────────────────────────────
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Ll]og/
+[Ll]ogs/
+
+# ─── NuGet ───────────────────────────────────────────────────────────────────
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+!packages/repositories.config
+nuget.config.local
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# NuGet v3+ cache
+~/.nuget/packages/
+.nuget/NuGet.Config
+
+# ─── Visual Studio ───────────────────────────────────────────────────────────
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]uild/
+[Bb]uild[Ll]og/
+
+# ─── Rider ───────────────────────────────────────────────────────────────────
+.idea/
+*.sln.iml
+
+# ─── VS Code ─────────────────────────────────────────────────────────────────
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# ─── Roslyn / Analyzers ──────────────────────────────────────────────────────
+*.rsuser
+*.VC.db
+*.VC.opendb
+
+# ─── Test results ────────────────────────────────────────────────────────────
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+TestResult.xml
+*.trx
+*.coverage
+*.coveragexml
+_CodeCoverageData/
+coverage*/
+.coverage/
+
+# ─── Publish profiles ────────────────────────────────────────────────────────
+*.[Pp]ublish.xml
+*.pubxml
+!*[Pp]ubxml.user
+*.publishproj
+
+# ─── Azure / App Service ─────────────────────────────────────────────────────
+PublishScripts/
+ServiceFabricBackup/
+*.mdf
+*.ldf
+*.ndf
+
+# ─── Entity Framework ────────────────────────────────────────────────────────
+*.edmx.diagram
+*.dbmdl
+
+# ─── .NET Hot Reload / Watch ─────────────────────────────────────────────────
+.hotreload/
+
+# ─── Docker ──────────────────────────────────────────────────────────────────
+.dockerignore
+
+# ─── Environment & secrets ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.local.json
+secrets.json
+**/secrets.json
+
+# ─── BenchmarkDotNet ─────────────────────────────────────────────────────────
+BenchmarkDotNet.Artifacts/
+
+# ─── Misc Windows ────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ─── Misc macOS ──────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# ─── Misc Linux ──────────────────────────────────────────────────────────────
+*~
+.nfs*
