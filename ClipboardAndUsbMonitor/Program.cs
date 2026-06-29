@@ -39,6 +39,7 @@ var windowReady      = new ManualResetEventSlim(false);
 MessageWindow?    window           = null;
 UsbMonitor?       usbMonitor       = null;
 BluetoothMonitor? bluetoothMonitor = null;
+DisplayMonitor?   displayMonitor   = null;
 
 // ── Message loop thread ───────────────────────────────────────────────────────
 // All Win32 message-based components (clipboard listener, USB notifications,
@@ -52,10 +53,12 @@ var msgThread = new Thread(() =>
         window           = new MessageWindow();
         usbMonitor       = new UsbMonitor(window, whitelist, blacklist);
         bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist);
+        displayMonitor   = new DisplayMonitor(window, whitelist, blacklist);
 
         using var clipboardMonitor = new ClipboardMonitor(window);
         using var usbMon           = usbMonitor;
         using var btMon            = bluetoothMonitor;
+        using var dispMon          = displayMonitor;
         using var keyboardHook     = new KeyboardHook();
 
         windowReady.Set(); // unblock main thread — monitors are set before this
@@ -65,6 +68,7 @@ var msgThread = new Thread(() =>
         // Runs on a ThreadPool thread so the message loop is never blocked.
         _ = Task.Run(usbMonitor.EnumerateExisting);
         _ = Task.Run(bluetoothMonitor.EnumerateExisting);
+        _ = Task.Run(displayMonitor.BlockNonCompliant);
 
         MessageWindow.RunMessageLoop(); // blocks until WM_QUIT
     }
@@ -97,8 +101,8 @@ var dispatcher = new CommandDispatcher(
     usbStorage:        new WindowsUsbStorageHandler(),
     usbDevice:         new WindowsUsbDeviceHandler(),
     usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist,
-        applyPolicy:    () => { usbMonitor!.BlockNonCompliant();   bluetoothMonitor!.BlockNonCompliant(); },
-        restoreDevices: () => { usbMonitor!.RestoreCompliant(); }),
+        applyPolicy:    () => { usbMonitor!.BlockNonCompliant(); bluetoothMonitor!.BlockNonCompliant(); displayMonitor!.BlockNonCompliant(); },
+        restoreDevices: () => { usbMonitor!.RestoreCompliant(); displayMonitor!.RestoreCompliant(); }),
     control:           new WindowsControlHandler());
 
 try

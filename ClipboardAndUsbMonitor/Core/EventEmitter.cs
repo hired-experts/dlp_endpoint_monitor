@@ -154,6 +154,33 @@ public record UsbBlacklistGetEvent(string? Id, bool Ok, bool Enabled, IEnumerabl
 }
 #endregion
 
+#region Display / Monitor
+// Vid = EDID manufacturer code (e.g. "SAM"), Pid = EDID product code (e.g. "0F91")
+[JsonDiscriminant(EventType.MonitorConnected)]
+public record MonitorConnectedEvent(string? Vid, string? Pid, string DevicePath, long Ts) : IEvent
+{
+    public EventType Type => EventType.MonitorConnected;
+}
+
+[JsonDiscriminant(EventType.MonitorDisconnected)]
+public record MonitorDisconnectedEvent(string? Vid, string? Pid, string DevicePath, long Ts) : IEvent
+{
+    public EventType Type => EventType.MonitorDisconnected;
+}
+
+[JsonDiscriminant(EventType.MonitorBlocked)]
+public record MonitorBlockedEvent(string? Vid, string? Pid, string DevicePath, long Ts) : IEvent
+{
+    public EventType Type => EventType.MonitorBlocked;
+}
+
+[JsonDiscriminant(EventType.MonitorBlockFailed)]
+public record MonitorBlockFailedEvent(string? Vid, string? Pid, string DevicePath, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.MonitorBlockFailed;
+}
+#endregion
+
 #region Keyboard
 [JsonDiscriminant(EventType.KeyboardShortcut)]
 public record KeyboardShortcutEvent(string Action, long Ts) : IEvent

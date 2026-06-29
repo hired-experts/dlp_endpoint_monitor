@@ -14,6 +14,7 @@ sealed class MessageWindow : IDisposable
 
     public event Action?              ClipboardChanged;
     public event Action<int, IntPtr>? DeviceChanged;    // (wParam, lParam)
+    public event Action?              DisplayChanged;
 
     public IntPtr Handle => _hWnd;
 
@@ -32,12 +33,15 @@ sealed class MessageWindow : IDisposable
         if (NativeMethods.RegisterClassEx(ref wc) == 0)
             throw new Win32Exception("RegisterClassEx");
 
-        // HWND_MESSAGE = message-only window
-        // invisible, no taskbar entry, no z-order, receives messages normally
+        // WS_POPUP off-screen: invisible, no taskbar entry, no focus stealing.
+        // We do NOT use HWND_MESSAGE because message-only windows do not receive
+        // broadcast messages such as WM_DISPLAYCHANGE.
         _hWnd = NativeMethods.CreateWindowEx(
-            0, wc.lpszClassName, "Monitor",
-            0, 0, 0, 0, 0,
-            NativeMethods.HWND_MESSAGE,
+            NativeMethods.WS_EX_TOOLWINDOW | NativeMethods.WS_EX_NOACTIVATE,
+            wc.lpszClassName, "Monitor",
+            NativeMethods.WS_POPUP,
+            -1, -1, 1, 1,
+            IntPtr.Zero,
             IntPtr.Zero,
             NativeMethods.GetModuleHandle(null),
             IntPtr.Zero);
@@ -80,6 +84,10 @@ sealed class MessageWindow : IDisposable
 
             case NativeMethods.WM_DEVICECHANGE:
                 DeviceChanged?.Invoke((int)wParam, lParam);
+                return IntPtr.Zero;
+
+            case NativeMethods.WM_DISPLAYCHANGE:
+                DisplayChanged?.Invoke();
                 return IntPtr.Zero;
 
             case NativeMethods.WM_DESTROY:

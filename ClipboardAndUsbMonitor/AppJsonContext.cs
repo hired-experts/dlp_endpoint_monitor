@@ -40,6 +40,12 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(UsbBlacklistGetEvent))]
 [JsonSerializable(typeof(UsbProtectionStatusEvent))]
 
+// ── Display / Monitor ─────────────────────────────────────────────────────────
+[JsonSerializable(typeof(MonitorConnectedEvent))]
+[JsonSerializable(typeof(MonitorDisconnectedEvent))]
+[JsonSerializable(typeof(MonitorBlockedEvent))]
+[JsonSerializable(typeof(MonitorBlockFailedEvent))]
+
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(KeyboardShortcutEvent))]
 

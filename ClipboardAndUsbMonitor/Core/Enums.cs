@@ -26,6 +26,10 @@ public enum EventType
     [JsonStringEnumMemberName("bluetooth_device_disconnected")]  BluetoothDeviceDisconnected,
     [JsonStringEnumMemberName("bluetooth_device_blocked")]       BluetoothDeviceBlocked,
     [JsonStringEnumMemberName("bluetooth_device_block_failed")]  BluetoothDeviceBlockFailed,
+    [JsonStringEnumMemberName("monitor_connected")]              MonitorConnected,
+    [JsonStringEnumMemberName("monitor_disconnected")]           MonitorDisconnected,
+    [JsonStringEnumMemberName("monitor_blocked")]                MonitorBlocked,
+    [JsonStringEnumMemberName("monitor_block_failed")]           MonitorBlockFailed,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
@@ -70,6 +74,7 @@ public enum DeviceKind
     [JsonStringEnumMemberName("hid")]       Hid,
     [JsonStringEnumMemberName("hub")]       Hub,
     [JsonStringEnumMemberName("keyboard")]  Keyboard,
+    [JsonStringEnumMemberName("monitor")]   Monitor,
     [JsonStringEnumMemberName("mouse")]     Mouse,
     [JsonStringEnumMemberName("mtp")]       Mtp,
     [JsonStringEnumMemberName("network")]   Network,
