@@ -57,6 +57,23 @@ static class UsbActions
         return new ParsedDevice(vid, pid, serial, null, null, DeviceKind.Unknown, null, working, rawPath);
     }
 
+    /// <summary>
+    /// Extracts only the instance ID from a device path that has no VID/PID
+    /// (e.g. USBSTOR, ACPI). Returns a <see cref="ParsedDevice"/> with empty
+    /// Vid/Pid so kind-only policy entries can still match.
+    /// Returns null for Unknown kind — those devices are not policy-relevant.
+    /// </summary>
+    public static ParsedDevice? ParsePartialDevice(string rawPath, DeviceKind kind)
+    {
+        if (kind == DeviceKind.Unknown) return null;
+
+        string working = rawPath.StartsWith(@"\\?\") ? rawPath[4..] : rawPath;
+        working = _guidSuffix.Replace(working, "").Replace('#', '\\');
+        return working.Length > 0
+            ? new ParsedDevice("", "", null, null, null, DeviceKind.Unknown, null, working, rawPath)
+            : null;
+    }
+
     // ── Startup enumeration ───────────────────────────────────────────────────
 
     /// <summary>
@@ -103,7 +120,8 @@ static class UsbActions
                     string     classGuid = ifaceGuid.ToString("B");
                     DeviceKind kind      = DeviceKindResolver.Resolve(classGuid, out int? usbClass);
 
-                    var parsed = ParseDevicePath(rawPath);
+                    var parsed = ParseDevicePath(rawPath)
+                                ?? ParsePartialDevice(rawPath, kind);
                     if (parsed is null) continue;
 
                     string? groupId = GetGroupId(parsed.InstanceId);
@@ -200,6 +218,31 @@ static class UsbActions
         return cr == NativeMethods.CR_SUCCESS
             ? (true, null)
             : (false, $"CM_Enable_DevNode failed: 0x{cr:X}");
+    }
+
+    /// <summary>
+    /// Requests the OS to eject the device via the PnP safe-removal path.
+    /// Unlike <see cref="DisableDevice"/>, this succeeds for HID input devices
+    /// (keyboards, mice) where CM_Disable_DevNode is rejected by Windows to
+    /// prevent keyboard lockout.
+    /// </summary>
+    public static (bool ok, string? error) RequestEject(string instanceId)
+    {
+        uint cr = NativeMethods.CM_Locate_DevNodeW(
+            out uint devNode, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+
+        if (cr != NativeMethods.CR_SUCCESS)
+            return (false, $"CM_Locate_DevNodeW failed: 0x{cr:X}");
+
+        cr = NativeMethods.CM_Request_Device_EjectW(devNode, out uint vetoType, IntPtr.Zero, 0, 0);
+
+        if (cr == NativeMethods.CR_SUCCESS && vetoType == 0)
+            return (true, null);
+
+        string reason = vetoType != 0
+            ? $"CM_Request_Device_EjectW vetoed (vetoType=0x{vetoType:X})"
+            : $"CM_Request_Device_EjectW failed: 0x{cr:X}";
+        return (false, reason);
     }
 
     // ── Eject a volume by drive letter ────────────────────────────────────────

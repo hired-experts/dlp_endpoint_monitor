@@ -139,7 +139,7 @@ public record UsbProtectionStatusEvent(string? Id, bool Ok, ProtectionMode Mode,
     public EventType Type => EventType.UsbProtectionStatus;
 }
 
-public record WhitelistEntryDto(string? Vid, string? Pid, string? Serial, DeviceKind? Kind, string? Label);
+public record WhitelistEntryDto(string? Vid, string? Pid, string? Serial, string? Mac, DeviceKind? Kind, string? Label);
 
 [JsonDiscriminant(EventType.UsbWhitelistGet)]
 public record UsbWhitelistGetEvent(string? Id, bool Ok, bool Enabled, IEnumerable<WhitelistEntryDto> Entries) : IEvent
@@ -159,5 +159,31 @@ public record UsbBlacklistGetEvent(string? Id, bool Ok, bool Enabled, IEnumerabl
 public record KeyboardShortcutEvent(string Action, long Ts) : IEvent
 {
     public EventType Type => EventType.KeyboardShortcut;
+}
+#endregion
+
+#region Bluetooth
+[JsonDiscriminant(EventType.BluetoothDeviceConnected)]
+public record BluetoothDeviceConnectedEvent(string Mac, DeviceKind Kind, string Name, bool Allowed, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceConnected;
+}
+
+[JsonDiscriminant(EventType.BluetoothDeviceDisconnected)]
+public record BluetoothDeviceDisconnectedEvent(string Mac, DeviceKind Kind, string Name, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceDisconnected;
+}
+
+[JsonDiscriminant(EventType.BluetoothDeviceBlocked)]
+public record BluetoothDeviceBlockedEvent(string Mac, DeviceKind Kind, string Name, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceBlocked;
+}
+
+[JsonDiscriminant(EventType.BluetoothDeviceBlockFailed)]
+public record BluetoothDeviceBlockFailedEvent(string Mac, DeviceKind Kind, string Name, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceBlockFailed;
 }
 #endregion

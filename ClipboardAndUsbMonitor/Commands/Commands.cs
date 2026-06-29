@@ -6,7 +6,7 @@ public interface ICommand { }
 
 // ── Shared ────────────────────────────────────────────────────────────────────
 
-record DeviceEntryDto(string? Vid, string? Pid, string? Serial, DeviceKind? Kind, string? Label);
+record DeviceEntryDto(string? Vid, string? Pid, string? Serial, string? Mac, DeviceKind? Kind, string? Label);
 
 // ── Clipboard ─────────────────────────────────────────────────────────────────
 
@@ -65,10 +65,10 @@ record UsbWhitelistGetCmd(string? Id) : ICommand;
 record UsbWhitelistClearCmd(string? Id) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbWhitelistAdd)]
-record UsbWhitelistAddCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, DeviceKind? Kind = null, string? Label = null) : ICommand;
+record UsbWhitelistAddCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, string? Mac = null, DeviceKind? Kind = null, string? Label = null) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbWhitelistRemove)]
-record UsbWhitelistRemoveCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, DeviceKind? Kind = null) : ICommand;
+record UsbWhitelistRemoveCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, string? Mac = null, DeviceKind? Kind = null) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbWhitelistSet)]
 record UsbWhitelistSetCmd(string? Id, DeviceEntryDto[] Entries) : ICommand;
@@ -89,10 +89,10 @@ record UsbBlacklistGetCmd(string? Id) : ICommand;
 record UsbBlacklistClearCmd(string? Id) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbBlacklistAdd)]
-record UsbBlacklistAddCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, DeviceKind? Kind = null, string? Label = null) : ICommand;
+record UsbBlacklistAddCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, string? Mac = null, DeviceKind? Kind = null, string? Label = null) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbBlacklistRemove)]
-record UsbBlacklistRemoveCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, DeviceKind? Kind = null) : ICommand;
+record UsbBlacklistRemoveCmd(string? Id, string? Vid = null, string? Pid = null, string? Serial = null, string? Mac = null, DeviceKind? Kind = null) : ICommand;
 
 [JsonDiscriminant(CommandType.UsbBlacklistSet)]
 record UsbBlacklistSetCmd(string? Id, DeviceEntryDto[] Entries) : ICommand;

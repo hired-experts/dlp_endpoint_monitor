@@ -75,6 +75,14 @@ static class DeviceKindResolver
         { "{378DE44C-56EF-11D1-BC8C-00A0C91405DD}", DeviceKind.Mouse     }, // GUID_DEVINTERFACE_MOUSE     (0x03 HID → mouse)
         { "{DEEBE6AD-9E01-47E2-A3B2-A66AA2C036C9}", DeviceKind.Biometric }, // Windows Biometric Framework  (0x03 HID → biometric)
         { "{BA1BB692-9B7A-4833-9A1E-525ED134E7E2}", DeviceKind.Sensor    }, // GUID_DEVINTERFACE_SENSOR    (0x03 HID → sensor)
+        // WPD portable devices: phones, tablets, cameras in MTP/PTP mode.
+        // All share class 0x06 with WIA imaging, but are distinguished here so
+        // policy can target "mtp" (phones/tablets) separately from "camera" (WIA devices).
+        { "{6AC27878-A6FA-4155-BA85-F98F491D4F33}", DeviceKind.Mtp       }, // GUID_DEVINTERFACE_WPD
+        { "{BA0C718F-4DED-49B7-BDD3-FABE28661211}", DeviceKind.Mtp       }, // GUID_DEVINTERFACE_WPD_PRIVATE
+        { "{E6D0DF1C-9DEF-11D2-A16C-00C04F8EEA30}", DeviceKind.Mtp       }, // WPD MTP cameras and phones
+        { "{F33FDC04-D1AC-4E8E-9A30-19BBD4B108AE}", DeviceKind.Mtp       }, // WPD Portable Video
+        { "{2EEF81BE-33FA-4800-9670-1CD474972C3F}", DeviceKind.Mtp       }, // WPD Generic
     };
 
     // Parsed once at startup; consumed by UsbActions.EnumerateConnected for SetupAPI calls.

@@ -9,8 +9,8 @@ internal sealed class UsbDeviceListState
 }
 
 /// <summary>
-/// Thread-safe, persistent list of USB device entries.
-/// Subclasses add their own allow/block decision on top.
+/// Thread-safe, persistent list of device entries covering both USB (vid/pid/serial)
+/// and Bluetooth (mac) devices. Subclasses add their own allow/block decision on top.
 /// </summary>
 abstract class UsbDeviceList
 {
@@ -52,22 +52,40 @@ abstract class UsbDeviceList
         Save();
     }
 
-    // ── Shared matching helper ─────────────────────────────────────────────────
+    // ── Matching ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns true if any entry matches the given device interface.
-    /// Null fields on an entry act as wildcards; VID/PID on the entry are also optional.
+    /// USB device matching. An entry only participates if it has no Mac set.
+    /// A kind-only entry (no vid/pid/serial/mac) matches any USB device of that kind.
     /// </summary>
-    protected bool MatchesAny(string vid, string pid, string? serial, DeviceKind kind)
+    protected bool MatchesAnyUsb(string vid, string pid, string? serial, DeviceKind kind)
     {
         _lock.EnterReadLock();
         try
         {
             return _state.Entries.Any(e =>
+                e.Mac is null &&
                 (e.Vid    is null || e.Vid.Equals(vid,    StringComparison.OrdinalIgnoreCase)) &&
                 (e.Pid    is null || e.Pid.Equals(pid,    StringComparison.OrdinalIgnoreCase)) &&
                 (e.Serial is null || e.Serial.Equals(serial, StringComparison.OrdinalIgnoreCase)) &&
                 (e.Kind   is null || e.Kind == kind));
+        }
+        finally { _lock.ExitReadLock(); }
+    }
+
+    /// <summary>
+    /// Bluetooth device matching. An entry only participates if it has no Vid/Pid/Serial set.
+    /// A kind-only entry (no vid/pid/serial/mac) matches any BT device of that kind.
+    /// </summary>
+    protected bool MatchesAnyBt(string mac, DeviceKind kind)
+    {
+        _lock.EnterReadLock();
+        try
+        {
+            return _state.Entries.Any(e =>
+                e.Vid is null && e.Pid is null && e.Serial is null &&
+                (e.Mac  is null || e.Mac.Equals(mac,  StringComparison.OrdinalIgnoreCase)) &&
+                (e.Kind is null || e.Kind == kind));
         }
         finally { _lock.ExitReadLock(); }
     }
@@ -83,6 +101,7 @@ abstract class UsbDeviceList
                 string.Equals(e.Vid,    device.Vid,    StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(e.Pid,    device.Pid,    StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(e.Serial, device.Serial, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(e.Mac,    device.Mac,    StringComparison.OrdinalIgnoreCase) &&
                 e.Kind == device.Kind);
             if (!exists) _state.Entries.Add(device);
         }
@@ -90,11 +109,7 @@ abstract class UsbDeviceList
         Save();
     }
 
-    /// <summary>
-    /// Removes entries matching the given fields. All parameters are optional;
-    /// omitting a field removes all entries regardless of that field's value.
-    /// </summary>
-    public void Remove(string? vid = null, string? pid = null, string? serial = null, DeviceKind? kind = null)
+    public void Remove(string? vid = null, string? pid = null, string? serial = null, string? mac = null, DeviceKind? kind = null)
     {
         _lock.EnterWriteLock();
         try
@@ -103,6 +118,7 @@ abstract class UsbDeviceList
                 (vid    is null || string.Equals(e.Vid,    vid,    StringComparison.OrdinalIgnoreCase)) &&
                 (pid    is null || string.Equals(e.Pid,    pid,    StringComparison.OrdinalIgnoreCase)) &&
                 (serial is null || string.Equals(e.Serial, serial, StringComparison.OrdinalIgnoreCase)) &&
+                (mac    is null || string.Equals(e.Mac,    mac,    StringComparison.OrdinalIgnoreCase)) &&
                 (kind   is null || e.Kind == kind));
         }
         finally { _lock.ExitWriteLock(); }

@@ -35,9 +35,10 @@ if (whitelist.IsEnabled && blacklist.IsEnabled)
 }
 
 // Signal set once the message window is ready
-var windowReady = new ManualResetEventSlim(false);
-MessageWindow? window     = null;
-UsbMonitor?    usbMonitor = null;
+var windowReady      = new ManualResetEventSlim(false);
+MessageWindow?    window           = null;
+UsbMonitor?       usbMonitor       = null;
+BluetoothMonitor? bluetoothMonitor = null;
 
 // ── Message loop thread ───────────────────────────────────────────────────────
 // All Win32 message-based components (clipboard listener, USB notifications,
@@ -48,19 +49,22 @@ var msgThread = new Thread(() =>
 {
     try
     {
-        window     = new MessageWindow();
-        usbMonitor = new UsbMonitor(window, whitelist, blacklist);
+        window           = new MessageWindow();
+        usbMonitor       = new UsbMonitor(window, whitelist, blacklist);
+        bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist);
 
         using var clipboardMonitor = new ClipboardMonitor(window);
-        using var monitor          = usbMonitor;
+        using var usbMon           = usbMonitor;
+        using var btMon            = bluetoothMonitor;
         using var keyboardHook     = new KeyboardHook();
 
-        windowReady.Set(); // unblock main thread — usbMonitor is set before this
+        windowReady.Set(); // unblock main thread — monitors are set before this
         EventEmitter.EmitInfo("ready");
 
         // Enumerate devices already connected before we started.
         // Runs on a ThreadPool thread so the message loop is never blocked.
         _ = Task.Run(usbMonitor.EnumerateExisting);
+        _ = Task.Run(bluetoothMonitor.EnumerateExisting);
 
         MessageWindow.RunMessageLoop(); // blocks until WM_QUIT
     }
@@ -92,7 +96,9 @@ var dispatcher = new CommandDispatcher(
     clipboard:         new WindowsClipboardHandler(),
     usbStorage:        new WindowsUsbStorageHandler(),
     usbDevice:         new WindowsUsbDeviceHandler(),
-    usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist, () => usbMonitor!.BlockNonCompliant()),
+    usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist,
+        applyPolicy:    () => { usbMonitor!.BlockNonCompliant();   bluetoothMonitor!.BlockNonCompliant(); },
+        restoreDevices: () => { usbMonitor!.RestoreCompliant(); }),
     control:           new WindowsControlHandler());
 
 try

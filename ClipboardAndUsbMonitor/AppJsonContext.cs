@@ -43,4 +43,10 @@ using System.Text.Json.Serialization;
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(KeyboardShortcutEvent))]
 
+// ── Bluetooth ─────────────────────────────────────────────────────────────────
+[JsonSerializable(typeof(BluetoothDeviceConnectedEvent))]
+[JsonSerializable(typeof(BluetoothDeviceDisconnectedEvent))]
+[JsonSerializable(typeof(BluetoothDeviceBlockedEvent))]
+[JsonSerializable(typeof(BluetoothDeviceBlockFailedEvent))]
+
 internal partial class AppJsonContext : JsonSerializerContext { }

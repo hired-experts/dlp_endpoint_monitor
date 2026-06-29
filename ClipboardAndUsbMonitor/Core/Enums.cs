@@ -21,7 +21,11 @@ public enum EventType
     [JsonStringEnumMemberName("usb_protection_status")]    UsbProtectionStatus,
     [JsonStringEnumMemberName("usb_whitelist_get")]        UsbWhitelistGet,
     [JsonStringEnumMemberName("usb_blacklist_get")]        UsbBlacklistGet,
-    [JsonStringEnumMemberName("keyboard_shortcut")]        KeyboardShortcut,
+    [JsonStringEnumMemberName("keyboard_shortcut")]              KeyboardShortcut,
+    [JsonStringEnumMemberName("bluetooth_device_connected")]     BluetoothDeviceConnected,
+    [JsonStringEnumMemberName("bluetooth_device_disconnected")]  BluetoothDeviceDisconnected,
+    [JsonStringEnumMemberName("bluetooth_device_blocked")]       BluetoothDeviceBlocked,
+    [JsonStringEnumMemberName("bluetooth_device_block_failed")]  BluetoothDeviceBlockFailed,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
@@ -67,6 +71,7 @@ public enum DeviceKind
     [JsonStringEnumMemberName("hub")]       Hub,
     [JsonStringEnumMemberName("keyboard")]  Keyboard,
     [JsonStringEnumMemberName("mouse")]     Mouse,
+    [JsonStringEnumMemberName("mtp")]       Mtp,
     [JsonStringEnumMemberName("network")]   Network,
     [JsonStringEnumMemberName("printer")]   Printer,
     [JsonStringEnumMemberName("sensor")]    Sensor,
