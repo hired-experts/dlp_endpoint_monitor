@@ -58,10 +58,26 @@ static class BluetoothActions
     public static DeviceKind GetKindFromCoD(uint cod)
     {
         uint major = (cod >> 8) & 0x1F;
+
+        // Peripheral (0x05): the top 2 bits of the 6-bit minor class distinguish
+        // keyboard (01) from pointing device/mouse (10) from combo (11). Resolving to
+        // the specific kind is required for category blocks like {kind:'mouse'} to match
+        // a Bluetooth mouse - a generic 'hid' would never match a 'mouse' blacklist entry.
+        if (major == 0x05)
+        {
+            uint peripheral = ((cod >> 2) & 0x3F) >> 4;
+            return peripheral switch
+            {
+                0x02 => DeviceKind.Mouse,     // pointing device
+                0x03 => DeviceKind.Mouse,     // combo keyboard + pointing -> treat as mouse for blocking
+                0x01 => DeviceKind.Keyboard,  // keyboard
+                _    => DeviceKind.Hid,       // unspecified peripheral
+            };
+        }
+
         return major switch
         {
             0x04 => DeviceKind.Audio,    // Audio/Video: headset, speaker, headphone
-            0x05 => DeviceKind.Hid,      // Peripheral: keyboard, mouse, joystick
             0x06 => DeviceKind.Camera,   // Imaging: printer, scanner, camera
             0x03 => DeviceKind.Network,  // LAN/Network Access Point
             _    => DeviceKind.Unknown,

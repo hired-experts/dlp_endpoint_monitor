@@ -17,6 +17,8 @@ public enum EventType
     [JsonStringEnumMemberName("usb_device_disconnected")]  UsbDeviceDisconnected,
     [JsonStringEnumMemberName("usb_device_blocked")]       UsbDeviceBlocked,
     [JsonStringEnumMemberName("usb_device_block_failed")]  UsbDeviceBlockFailed,
+    [JsonStringEnumMemberName("usb_device_unblocked")]      UsbDeviceUnblocked,
+    [JsonStringEnumMemberName("usb_device_unblock_failed")] UsbDeviceUnblockFailed,
     [JsonStringEnumMemberName("usb_storage_status")]       UsbStorageStatus,
     [JsonStringEnumMemberName("device_protection_status")]    DeviceProtectionStatus,
     [JsonStringEnumMemberName("device_whitelist_get")]        DeviceWhitelistGet,

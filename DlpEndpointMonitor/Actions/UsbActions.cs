@@ -115,9 +115,12 @@ static class UsbActions
                     var detail = new SP_DEVICE_INTERFACE_DETAIL_DATA_W();
                     detail.cbSize = DetailCbSize;
 
+                    var devInfoData = new SP_DEVINFO_DATA();
+                    devInfoData.cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>();
+
                     if (!NativeMethods.SetupDiGetDeviceInterfaceDetail(
                             devInfo, ref ifaceData, ref detail,
-                            detailBufSize, out _, IntPtr.Zero))
+                            detailBufSize, out _, ref devInfoData))
                         continue;
 
                     string     rawPath   = detail.DevicePath;
@@ -128,13 +131,20 @@ static class UsbActions
                                 ?? ParsePartialDevice(rawPath, kind);
                     if (parsed is null) continue;
 
-                    string? groupId = GetGroupId(parsed.InstanceId);
+                    // Use the true instance ID from SetupAPI. Deriving it from the interface path
+                    // (ToInstanceId) breaks for some HID paths - it collapsed to "hid" for a
+                    // Bluetooth-LE HID mouse, so CM_Locate_DevNodeW/DisableDevice silently failed
+                    // and the mouse was matched as kind=mouse but never actually disabled.
+                    string instanceId = GetDeviceInstanceId(devInfo, ref devInfoData) ?? parsed.InstanceId;
+
+                    string? groupId = GetGroupId(instanceId);
                     yield return parsed with
                     {
-                        ClassGuid = classGuid,
-                        UsbClass  = usbClass,
-                        Kind      = kind,
-                        GroupId   = groupId,
+                        InstanceId = instanceId,
+                        ClassGuid  = classGuid,
+                        UsbClass   = usbClass,
+                        Kind       = kind,
+                        GroupId    = groupId,
                     };
                 }
             }
@@ -143,6 +153,18 @@ static class UsbActions
                 NativeMethods.SetupDiDestroyDeviceInfoList(devInfo);
             }
         }
+    }
+
+    /// <summary>
+    /// Reads the true device instance ID of a devnode via SetupDiGetDeviceInstanceId.
+    /// Returns null on failure, in which case the caller falls back to the path-derived id.
+    /// </summary>
+    static string? GetDeviceInstanceId(IntPtr devInfo, ref SP_DEVINFO_DATA devInfoData)
+    {
+        var sb = new StringBuilder(512);
+        return NativeMethods.SetupDiGetDeviceInstanceId(devInfo, ref devInfoData, sb, (uint)sb.Capacity, out _)
+            ? sb.ToString()
+            : null;
     }
 
     // ── Device tree — group ID ────────────────────────────────────────────────
@@ -222,6 +244,109 @@ static class UsbActions
         return cr == NativeMethods.CR_SUCCESS
             ? (true, null)
             : (false, $"CM_Enable_DevNode failed: 0x{cr:X}");
+    }
+
+    // ── Internal / strict-device protection ──────────────────────────────────
+
+    // The machine's own essential devices on a laptop. A built-in one of these must never be
+    // disabled/ejected: keyboard/mouse/hid = local input; hub = disabling an internal/root hub
+    // takes down everything downstream (including the built-in keyboard). Camera/Video are
+    // deliberately NOT here - a built-in webcam is allowed to be blocked.
+    static readonly HashSet<DeviceKind> StrictInputKinds =
+        [DeviceKind.Keyboard, DeviceKind.Mouse, DeviceKind.Hid, DeviceKind.Hub];
+
+    /// <summary>
+    /// Whether a device can be physically removed. A built-in / soldered device reports
+    /// CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL. On ANY read failure this FAILS SAFE and returns
+    /// false (treat as internal), so an undeterminable device is never blocked as if external.
+    /// </summary>
+    public static bool IsRemovable(string instanceId)
+    {
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint devNode, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+        if (cr != NativeMethods.CR_SUCCESS) return false;
+
+        uint len = sizeof(uint);
+        cr = NativeMethods.CM_Get_DevNode_Registry_PropertyW(
+            devNode, NativeMethods.CM_DRP_REMOVAL_POLICY, out _, out uint policy, ref len, 0);
+        if (cr != NativeMethods.CR_SUCCESS) return false;
+
+        return policy != NativeMethods.CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL;
+    }
+
+    // True if any ancestor devnode is on a Bluetooth enumerator (BTHENUM\, BTHLE\, BTHLEDEVICE\).
+    // A wireless HID device's own instance id (e.g. HID\{00001812-...}) does not say "BTH" - the
+    // Bluetooth origin is on a parent node - so we walk the tree.
+    public static bool HasBluetoothAncestor(string instanceId)
+    {
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+        if (cr != NativeMethods.CR_SUCCESS) return false;
+
+        for (int depth = 0; depth < 12; depth++)
+        {
+            var sb = new StringBuilder((int)NativeMethods.MAX_DEVICE_ID_LEN + 1);
+            if (NativeMethods.CM_Get_Device_IDW(current, sb, NativeMethods.MAX_DEVICE_ID_LEN + 1, 0) != NativeMethods.CR_SUCCESS) break;
+            if (sb.ToString().StartsWith("BTH", StringComparison.OrdinalIgnoreCase)) return true;
+            if (NativeMethods.CM_Get_Parent(out uint parent, current, 0) != NativeMethods.CR_SUCCESS) break;
+            current = parent;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// For a Bluetooth-backed HID device, returns the instance ID of its Bluetooth DEVICE node
+    /// - the first ancestor under BTHLEDEVICE\ (BLE) or BTHENUM\ (classic). Disabling THAT node
+    /// (rather than the HID leaf) stops the device robustly: vendor software (e.g. Logitech
+    /// Options) re-enables the HID leaf, and the device's "USB ancestor" is the shared Bluetooth
+    /// radio, which must never be disabled. Scoped to this one peripheral, reversible via
+    /// CM_Enable, and does NOT unpair. Returns null when the device is not behind Bluetooth.
+    /// </summary>
+    public static string? GetBluetoothDeviceNode(string instanceId)
+    {
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+        if (cr != NativeMethods.CR_SUCCESS) return null;
+
+        for (int depth = 0; depth < 12; depth++)
+        {
+            var sb = new StringBuilder((int)NativeMethods.MAX_DEVICE_ID_LEN + 1);
+            if (NativeMethods.CM_Get_Device_IDW(current, sb, NativeMethods.MAX_DEVICE_ID_LEN + 1, 0) != NativeMethods.CR_SUCCESS) break;
+            string id = sb.ToString();
+            // Stop at the peripheral's own device node. Do NOT ascend to BTHLE\ / BTH\ or the
+            // USB radio above them.
+            if (id.StartsWith("BTHLEDEVICE\\", StringComparison.OrdinalIgnoreCase)
+                || id.StartsWith("BTHENUM\\", StringComparison.OrdinalIgnoreCase))
+                return id;
+            if (NativeMethods.CM_Get_Parent(out uint parent, current, 0) != NativeMethods.CR_SUCCESS) break;
+            current = parent;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// SAFETY (criterion 5): a built-in keyboard/touchpad must never be blocked (it would brick
+    /// local input on a laptop). "Built-in" is decided by TRANSPORT BUS, not removability:
+    /// - USB input: external and blockable, UNLESS its physical USB node reports non-removable
+    ///   (rare internal-USB input) - checked on the USB node, where removal policy is reliable.
+    /// - Bluetooth/BLE input: always an external wireless peripheral -> blockable. (Windows
+    ///   reports it non-removable, which is why removal policy alone wrongly protected it.)
+    /// - No USB and no Bluetooth ancestor -> an internal bus (ACPI/I2C/PS2) -> built-in -> protect.
+    /// Camera/Video are not strict kinds, so a built-in webcam stays blockable.
+    /// </summary>
+    public static bool IsProtectedInternal(DeviceKind kind, string instanceId)
+    {
+        if (!StrictInputKinds.Contains(kind)) return false;
+
+        // Check Bluetooth FIRST. A wireless BT/BLE mouse is external and blockable, but the
+        // Bluetooth radio itself is frequently a USB device (e.g. USB\VID_0BDA...), which sits
+        // ABOVE the BTH nodes in the tree - so a USB-ancestor check would find the radio and
+        // wrongly treat the wireless input as built-in USB.
+        if (HasBluetoothAncestor(instanceId)) return false;
+
+        // On the USB bus: external unless the physical USB node is non-removable (rare internal-USB input).
+        string? usbAncestor = GetGroupId(instanceId);
+        if (usbAncestor is not null)
+            return !IsRemovable(usbAncestor);
+
+        return true;
     }
 
     /// <summary>

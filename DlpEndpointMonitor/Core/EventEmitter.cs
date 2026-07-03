@@ -127,6 +127,18 @@ public record UsbDeviceBlockFailedEvent(string Vid, string Pid, string? Serial, 
     public EventType Type => EventType.UsbDeviceBlockFailed;
 }
 
+[JsonDiscriminant(EventType.UsbDeviceUnblocked)]
+public record UsbDeviceUnblockedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string InstanceId, long Ts) : IEvent
+{
+    public EventType Type => EventType.UsbDeviceUnblocked;
+}
+
+[JsonDiscriminant(EventType.UsbDeviceUnblockFailed)]
+public record UsbDeviceUnblockFailedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string InstanceId, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.UsbDeviceUnblockFailed;
+}
+
 [JsonDiscriminant(EventType.UsbStorageStatus)]
 public record UsbStorageStatusEvent(string? Id, bool Ok, bool Enabled) : IEvent
 {

@@ -171,31 +171,64 @@ sealed class UsbMonitor : IDisposable
 
     void BlockDevice(ParsedDevice parsed)
     {
+        // SAFETY (criterion 5): never block a built-in keyboard / touchpad / pointing device -
+        // disabling or ejecting it would brick local input on a laptop, and an eject is
+        // unrecoverable by software. External input and camera/video remain blockable. This is
+        // the single choke point for every block path (arrival, apply, startup enum).
+        if (UsbActions.IsProtectedInternal(parsed.Kind, parsed.InstanceId))
+        {
+            EventEmitter.Emit(new UsbDeviceBlockFailedEvent(
+                parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind,
+                parsed.ClassGuid, parsed.GroupId, parsed.InstanceId,
+                "protected internal input device (built-in keyboard/touchpad) - refused to block",
+                EventEmitter.Ts()));
+            return;
+        }
+
         // Track the exact devnode that ends up disabled so restore can re-enable it by
         // instance ID later (a disabled device has no interface to enumerate).
         string? disabledId = null;
+        bool    ok;
+        string? error;
 
-        var (ok, error) = UsbActions.DisableDevice(parsed.InstanceId);
-        if (ok) disabledId = parsed.InstanceId;
-
-        // If HID-level disable was rejected, try at the USB composite device level — reversible.
-        if (!ok && parsed.GroupId is not null)
+        // Bluetooth-backed HID (BLE/classic): disable the device's own BTHLEDEVICE/BTHENUM node,
+        // NOT the HID leaf. Vendor software (e.g. Logitech Options) re-enables the leaf, and the
+        // device's "USB ancestor" is the shared Bluetooth radio, which must never be disabled.
+        // This is a plain CM_Disable of that one peripheral node - reversible, tracked, no unpair.
+        string? btNode = UsbActions.GetBluetoothDeviceNode(parsed.InstanceId);
+        if (btNode is not null)
         {
-            var (groupOk, groupErr) = UsbActions.DisableDevice(parsed.GroupId);
-            if (groupOk) { ok = true; error = null; disabledId = parsed.GroupId; }
-            else error ??= groupErr;
+            (ok, error) = UsbActions.DisableDevice(btNode);
+            if (ok) disabledId = btNode;
+            // No USB-group / eject fallback for Bluetooth - both would target the radio.
         }
-
-        // Last resort: physically eject via CM_Request_Device_EjectW. Windows rejects
-        // CM_Disable_DevNode for input devices (keyboards, mice) to prevent lockout.
-        // Eject disconnects the device from the USB bus — same UX as Bluetooth pairing
-        // removal: device disappears immediately, manual replug required to restore.
-        // (An eject is not a CM_Disable, so there is nothing to persist/re-enable.)
-        if (!ok && parsed.GroupId is not null)
+        else
         {
-            var (ejectOk, ejectErr) = UsbActions.RequestEject(parsed.GroupId);
-            if (ejectOk) { ok = true; error = null; }
-            else error ??= ejectErr;
+            (ok, error) = UsbActions.DisableDevice(parsed.InstanceId);
+            if (ok) disabledId = parsed.InstanceId;
+
+            // Escalate to the USB composite parent / eject ONLY for genuine USB devices - never
+            // when there is any Bluetooth ancestor (its "group" is the shared radio).
+            bool usbEscalate = parsed.GroupId is not null && !UsbActions.HasBluetoothAncestor(parsed.InstanceId);
+
+            // If HID-level disable was rejected, try at the USB composite device level - reversible.
+            if (!ok && usbEscalate)
+            {
+                var (groupOk, groupErr) = UsbActions.DisableDevice(parsed.GroupId!);
+                if (groupOk) { ok = true; error = null; disabledId = parsed.GroupId; }
+                else error ??= groupErr;
+            }
+
+            // Last resort: physically eject via CM_Request_Device_EjectW. Windows rejects
+            // CM_Disable_DevNode for input devices (keyboards, mice) to prevent lockout.
+            // Eject disconnects the device from the USB bus - manual replug required to restore.
+            // (An eject is not a CM_Disable, so there is nothing to persist/re-enable.)
+            if (!ok && usbEscalate)
+            {
+                var (ejectOk, ejectErr) = UsbActions.RequestEject(parsed.GroupId!);
+                if (ejectOk) { ok = true; error = null; }
+                else error ??= ejectErr;
+            }
         }
 
         if (disabledId is not null)
@@ -228,11 +261,26 @@ sealed class UsbMonitor : IDisposable
                             && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
                 if (!allowed) { stillBlocked++; continue; }
 
-                // Best-effort: an absent (unplugged) device simply cannot be located; we still
-                // forget it, since policy no longer blocks it and a replug will re-evaluate it.
-                UsbActions.EnableDevice(d.InstanceId);
-                _disabled.Remove(d.InstanceId);
-                restored++;
+                var (ok, error) = UsbActions.EnableDevice(d.InstanceId);
+                if (ok)
+                {
+                    _disabled.Remove(d.InstanceId);
+                    restored++;
+                    EventEmitter.Emit(new UsbDeviceUnblockedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.InstanceId, EventEmitter.Ts()));
+                }
+                else if (error is not null && error.Contains("Locate", StringComparison.Ordinal))
+                {
+                    // Device is absent (unplugged): can't re-enable it now, but policy allows it,
+                    // so forget the record - a physical replug will re-evaluate it as allowed.
+                    _disabled.Remove(d.InstanceId);
+                }
+                else
+                {
+                    // Present but re-enable FAILED: keep the record so the next restore retries
+                    // it (do NOT orphan a still-disabled device), and surface the failure.
+                    stillBlocked++;
+                    EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.InstanceId, error, EventEmitter.Ts()));
+                }
             }
             EventEmitter.EmitInfo($"usb_policy_restore: restored {restored}, still-blocked {stillBlocked}");
         }

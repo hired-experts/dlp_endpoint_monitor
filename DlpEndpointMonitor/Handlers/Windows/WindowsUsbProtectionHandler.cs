@@ -39,6 +39,9 @@ sealed class WindowsUsbProtectionHandler : IUsbProtectionHandler
     {
         _blacklist.SetEnabled(false);
         _whitelist.SetEnabled(true);
+        // Enforce immediately on already-connected devices (mirrors blacklist enable) so
+        // switching to Whitelist mode blocks non-allowed devices without waiting for a replug.
+        Task.Run(_applyPolicy);
         EventEmitter.Emit(new ReplyEvent(command.Id, true));
     }
 
@@ -58,6 +61,11 @@ sealed class WindowsUsbProtectionHandler : IUsbProtectionHandler
 
     public void Handle(DeviceWhitelistClearCmd command)
     {
+        // Factory reset (criterion 3): also DISABLE the list. An enabled-but-empty whitelist is
+        // deny-all (IsAllowed matches nothing), so a bare Clear() would leave every device the
+        // whitelist blocked still disabled - RestoreCompliant would re-enable nothing. Disabling
+        // makes IsAllowed return true so restore re-enables all previously-blocked devices.
+        _whitelist.SetEnabled(false);
         _whitelist.Clear();
         Task.Run(_restoreDevices);
         EventEmitter.Emit(new ReplyEvent(command.Id, true));
@@ -82,6 +90,9 @@ sealed class WindowsUsbProtectionHandler : IUsbProtectionHandler
         _whitelist.Set(command.Entries
             .Select(entry => new UsbDeviceEntry(entry.Vid, entry.Pid, entry.Serial, entry.Mac, entry.Kind, entry.Label))
             .ToList());
+        // A `set` can both loosen and tighten: restore re-enables now-allowed devices, apply
+        // blocks newly-disallowed ones. They act on disjoint sets, so restore-then-apply is safe.
+        Task.Run(() => { _restoreDevices(); _applyPolicy(); });
         EventEmitter.Emit(new ReplyEvent(command.Id, true));
     }
 
@@ -136,7 +147,10 @@ sealed class WindowsUsbProtectionHandler : IUsbProtectionHandler
         _blacklist.Set(command.Entries
             .Select(entry => new UsbDeviceEntry(entry.Vid, entry.Pid, entry.Serial, entry.Mac, entry.Kind, entry.Label))
             .ToList());
-        Task.Run(_applyPolicy);
+        // A `set` can drop entries that were blocking connected devices; restore re-enables those,
+        // apply blocks any newly-listed ones. Restore-then-apply (was apply-only, which never
+        // re-enabled devices a set now allows).
+        Task.Run(() => { _restoreDevices(); _applyPolicy(); });
         EventEmitter.Emit(new ReplyEvent(command.Id, true));
     }
 }

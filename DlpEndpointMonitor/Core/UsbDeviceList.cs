@@ -92,18 +92,21 @@ abstract class UsbDeviceList
 
     // ── Mutations ─────────────────────────────────────────────────────────────
 
+    // Two entries are the SAME DEVICE when their identifying fields match (case-insensitive).
+    // Label is cosmetic and intentionally ignored - a relabelled duplicate is still a duplicate.
+    static bool SameDevice(UsbDeviceEntry a, UsbDeviceEntry b) =>
+        string.Equals(a.Vid,    b.Vid,    StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(a.Pid,    b.Pid,    StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(a.Serial, b.Serial, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(a.Mac,    b.Mac,    StringComparison.OrdinalIgnoreCase) &&
+        a.Kind == b.Kind;
+
     public void Add(UsbDeviceEntry device)
     {
         _lock.EnterWriteLock();
         try
         {
-            bool exists = _state.Entries.Any(e =>
-                string.Equals(e.Vid,    device.Vid,    StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(e.Pid,    device.Pid,    StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(e.Serial, device.Serial, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(e.Mac,    device.Mac,    StringComparison.OrdinalIgnoreCase) &&
-                e.Kind == device.Kind);
-            if (!exists) _state.Entries.Add(device);
+            if (!_state.Entries.Any(e => SameDevice(e, device))) _state.Entries.Add(device);
         }
         finally { _lock.ExitWriteLock(); }
         Save();
@@ -125,14 +128,15 @@ abstract class UsbDeviceList
         Save();
     }
 
-    /// <summary>Replace the entire list atomically.</summary>
+    /// <summary>Replace the entire list atomically, dropping duplicate devices.</summary>
     public void Set(IEnumerable<UsbDeviceEntry> devices)
     {
         _lock.EnterWriteLock();
         try
         {
             _state.Entries.Clear();
-            _state.Entries.AddRange(devices);
+            foreach (var d in devices)
+                if (!_state.Entries.Any(e => SameDevice(e, d))) _state.Entries.Add(d);
         }
         finally { _lock.ExitWriteLock(); }
         Save();
