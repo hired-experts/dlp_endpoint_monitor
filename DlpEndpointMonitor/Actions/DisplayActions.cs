@@ -146,14 +146,16 @@ static class DisplayActions
     }
 
     /// <summary>
-    /// Restores extended desktop. Non-fatal if no external display is connected.
+    /// Restores extended desktop.
     /// </summary>
     public static (bool ok, string? error) EnableExternalDisplays()
     {
         int result = NativeMethods.SetDisplayConfig(
             0, IntPtr.Zero, 0, IntPtr.Zero,
             NativeMethods.SDC_APPLY | NativeMethods.SDC_TOPOLOGY_EXTEND);
-        return (true, result != 0 ? $"SetDisplayConfig(EXTEND) returned 0x{result:X}" : null);
+        return result == 0
+            ? (true, null)
+            : (false, $"SetDisplayConfig(EXTEND) failed: 0x{result:X}");
     }
 
     /// <summary>

@@ -6,12 +6,13 @@ namespace DlpEndpointMonitor.Tests;
 /// <summary>
 /// docs/TEST-PLAN.md section 2.5 (T-LIST-01..15): DeviceWhitelist/DeviceBlacklist matching
 /// and dedup, via the storage-dir constructor seam so every test uses its own throwaway
-/// directory instead of the real ~/.dlp.
+/// directory instead of the real %ProgramData%\DlpEndpointMonitor\.
 /// </summary>
 public class UsbDeviceListTests
 {
     // Never construct DeviceWhitelist()/DeviceBlacklist() with no arguments in a test -
-    // that reads/writes the real ~/.dlp files. Always pass a fresh temp directory.
+    // that reads/writes the real %ProgramData%\DlpEndpointMonitor\ files. Always pass a
+    // fresh temp directory.
     static void WithTempDir(Action<string> test)
     {
         string dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));

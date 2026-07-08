@@ -170,8 +170,10 @@ static class UsbActions
     /// <summary>
     /// Reads the true device instance ID of a devnode via SetupDiGetDeviceInstanceId.
     /// Returns null on failure, in which case the caller falls back to the path-derived id.
+    /// Internal (not private) so <see cref="BluetoothActions"/> can reuse it rather than
+    /// duplicating the same SetupDiGetDeviceInstanceId call.
     /// </summary>
-    static string? GetDeviceInstanceId(IntPtr devInfo, ref SP_DEVINFO_DATA devInfoData)
+    internal static string? GetDeviceInstanceId(IntPtr devInfo, ref SP_DEVINFO_DATA devInfoData)
     {
         var sb = new StringBuilder(512);
         return NativeMethods.SetupDiGetDeviceInstanceId(devInfo, ref devInfoData, sb, (uint)sb.Capacity, out _)
@@ -306,11 +308,16 @@ static class UsbActions
 
     /// <summary>
     /// For a Bluetooth-backed HID device, returns the instance ID of its Bluetooth DEVICE node
-    /// - the first ancestor under BTHLEDEVICE\ (BLE) or BTHENUM\ (classic). Disabling THAT node
-    /// (rather than the HID leaf) stops the device robustly: vendor software (e.g. Logitech
-    /// Options) re-enables the HID leaf, and the device's "USB ancestor" is the shared Bluetooth
-    /// radio, which must never be disabled. Scoped to this one peripheral, reversible via
-    /// CM_Enable, and does NOT unpair. Returns null when the device is not behind Bluetooth.
+    /// - BTHENUM\ (classic) or, for BLE, the true top-level peripheral under BTHLE\ (NOT
+    /// BTHLEDEVICE\, which is one level too shallow - a GATT-service child of the peripheral,
+    /// not the peripheral itself; verified live: BTHLE\DEV_&lt;mac&gt;\... is what Device Manager
+    /// shows as the device's own friendly name, e.g. "MX Vertical", while BTHLEDEVICE\...
+    /// entries underneath it are individual GATT services such as "GATT compliant HID device").
+    /// Disabling THAT node (rather than the HID leaf) stops the device robustly: vendor
+    /// software (e.g. Logitech Options) re-enables the HID leaf, and the device's "USB
+    /// ancestor" is the shared Bluetooth radio, which must never be disabled. Scoped to this
+    /// one peripheral, reversible via CM_Enable, and does NOT unpair. Returns null when the
+    /// device is not behind Bluetooth.
     /// </summary>
     public static string? GetBluetoothDeviceNode(string instanceId)
     {
@@ -322,11 +329,14 @@ static class UsbActions
             var sb = new StringBuilder((int)NativeMethods.MAX_DEVICE_ID_LEN + 1);
             if (NativeMethods.CM_Get_Device_IDW(current, sb, NativeMethods.MAX_DEVICE_ID_LEN + 1, 0) != NativeMethods.CR_SUCCESS) break;
             string id = sb.ToString();
-            // Stop at the peripheral's own device node. Do NOT ascend to BTHLE\ / BTH\ or the
-            // USB radio above them.
-            if (id.StartsWith("BTHLEDEVICE\\", StringComparison.OrdinalIgnoreCase)
-                || id.StartsWith("BTHENUM\\", StringComparison.OrdinalIgnoreCase))
+            // Classic Bluetooth's own device node - stop here, do NOT ascend to the USB radio above it.
+            if (id.StartsWith("BTHENUM\\", StringComparison.OrdinalIgnoreCase))
                 return id;
+            // BLE's true peripheral node (one level above BTHLEDEVICE\'s GATT-service children) -
+            // stop here, do NOT ascend to BTH\MS_BTHLE\ (the enumerator driver) above it.
+            if (id.StartsWith("BTHLE\\", StringComparison.OrdinalIgnoreCase))
+                return id;
+            // BTHLEDEVICE\ itself is a GATT-service child, not the peripheral - keep walking up.
             if (NativeMethods.CM_Get_Parent(out uint parent, current, 0) != NativeMethods.CR_SUCCESS) break;
             current = parent;
         }
@@ -334,13 +344,34 @@ static class UsbActions
     }
 
     /// <summary>
+    /// Bus-ancestry decision shared by <see cref="IsProtectedInternal"/> (strict input kinds)
+    /// and <see cref="NetworkMonitor"/>'s own built-in-adapter guard - the machine's only
+    /// network adapter is exactly as essential as its built-in keyboard: disabling it can
+    /// strand a managed endpoint with no connectivity to report the disconnection back to
+    /// the sibling dlp_v2 agent. Internal (no removable USB ancestor) -> never block.
+    /// External/removable (USB WiFi/Ethernet dongle) -> still blockable, this is a real DLP
+    /// use case (blocking a rogue USB network adapter used to bypass monitoring).
+    /// </summary>
+    public static bool IsBuiltIn(string instanceId)
+    {
+        // Check Bluetooth FIRST. A wireless BT/BLE mouse is external and blockable, but the
+        // Bluetooth radio itself is frequently a USB device (e.g. USB\VID_0BDA...), which sits
+        // ABOVE the BTH nodes in the tree - so a USB-ancestor check would find the radio and
+        // wrongly treat the wireless input as built-in USB.
+        if (HasBluetoothAncestor(instanceId)) return false; // BT is always external
+
+        // On the USB bus: external unless the physical USB node is non-removable (rare internal-USB device).
+        string? usbAncestor = GetGroupId(instanceId);
+        if (usbAncestor is not null)
+            return !IsRemovable(usbAncestor);
+
+        return true; // no bus ancestor at all -> internal
+    }
+
+    /// <summary>
     /// SAFETY (criterion 5): a built-in keyboard/touchpad must never be blocked (it would brick
-    /// local input on a laptop). "Built-in" is decided by TRANSPORT BUS, not removability:
-    /// - USB input: external and blockable, UNLESS its physical USB node reports non-removable
-    ///   (rare internal-USB input) - checked on the USB node, where removal policy is reliable.
-    /// - Bluetooth/BLE input: always an external wireless peripheral -> blockable. (Windows
-    ///   reports it non-removable, which is why removal policy alone wrongly protected it.)
-    /// - No USB and no Bluetooth ancestor -> an internal bus (ACPI/I2C/PS2) -> built-in -> protect.
+    /// local input on a laptop). "Built-in" is decided by TRANSPORT BUS, not removability - see
+    /// <see cref="IsBuiltIn"/> for the bus-ancestry walk this delegates to.
     /// Camera/Video are not strict kinds, so a built-in webcam stays blockable.
     ///
     /// Kind == Unknown is ALSO routed through this same bus-ancestry check (not just
@@ -356,18 +387,7 @@ static class UsbActions
     {
         if (!StrictInputKinds.Contains(kind) && kind != DeviceKind.Unknown) return false;
 
-        // Check Bluetooth FIRST. A wireless BT/BLE mouse is external and blockable, but the
-        // Bluetooth radio itself is frequently a USB device (e.g. USB\VID_0BDA...), which sits
-        // ABOVE the BTH nodes in the tree - so a USB-ancestor check would find the radio and
-        // wrongly treat the wireless input as built-in USB.
-        if (HasBluetoothAncestor(instanceId)) return false;
-
-        // On the USB bus: external unless the physical USB node is non-removable (rare internal-USB input).
-        string? usbAncestor = GetGroupId(instanceId);
-        if (usbAncestor is not null)
-            return !IsRemovable(usbAncestor);
-
-        return true;
+        return IsBuiltIn(instanceId);
     }
 
     /// <summary>

@@ -90,13 +90,16 @@ DlpEndpointMonitor/
     CommandsJsonContext.cs     System.Text.Json source-gen context for commands
   Monitors/                   Win32-message-driven watchers; live on the STA message-loop thread
     UsbMonitor.cs             USB device arrival/removal, policy enforcement, restore
-    BluetoothMonitor.cs       Bluetooth device arrival/removal, policy enforcement
+    BluetoothMonitor.cs       Bluetooth device arrival/removal, policy enforcement, restore
     DisplayMonitor.cs         external monitor arrival, WM_DISPLAYCHANGE debounce, policy enforcement
+    NetworkMonitor.cs         NIC arrival/removal, policy enforcement, restore - own monitor (not
+                              UsbMonitor's composite pipeline), guarded by UsbActions.IsBuiltIn
     ClipboardMonitor.cs       WM_CLIPBOARDUPDATE -> reads and emits clipboard content
     KeyboardHook.cs           low-level keyboard hook: detects Ctrl+C/X/V/Z (reporting only, no blocking)
   Actions/                    stateless Win32 P/Invoke helpers, no policy logic
     UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle
-    BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing), path/CoD parsing
+    BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing), MAC-to-PnP-node
+                              resolution (FindInstanceIdByMac), path/CoD parsing
     DisplayActions.cs         QueryDisplayConfig/SetDisplayConfig(Paths) topology juggling
     ClipboardActions.cs       OpenClipboard/GetClipboardData/SetClipboardData
   Handlers/
@@ -272,6 +275,21 @@ what is and is not covered and why.
 - Never commit secrets - there are none expected in this repo (no network calls, no
   credentials), so a diff that adds any is almost certainly wrong.
 
+**DRY (Don't Repeat Yourself)**
+- Before writing a value, constant, or piece of logic, check whether it already exists
+  somewhere else in the codebase - reuse or extract a shared helper instead of retyping it.
+  Concrete precedent: `Core/StorageLocation.cs` holds the one `%ProgramData%\DlpEndpointMonitor`
+  computation that `UsbDeviceList` and `DisabledDevices` both need - it used to be duplicated
+  identically in both files (copy-pasted when `DisabledDevices` was added), which is exactly
+  the failure mode this rule exists to prevent: two copies silently drifting apart the next
+  time the path changes (as it did, twice - see PROJECT.md section 6).
+- This is the same instinct as the harness's "REUSE FIRST" rule
+  (`ai_agent_doc/scripts/WORKFLOW-CRITERIA.md`) applied to hand-written edits, not just
+  workflow-spawned agents: grep for an existing symbol before writing raw code, and if a
+  genuine third use of the same value/logic shows up, that is the signal to extract a shared
+  helper in the right layer (`Actions/` for Win32, `Core/` for state) rather than adding a
+  third copy.
+
 **Comments**
 - Write direct, objective comments: explain the *why* (a non-obvious Windows quirk, a
   concurrency invariant, a past bug this line prevents), never restate the *what* the code
@@ -354,6 +372,20 @@ what is and is not covered and why.
   `HasBluetoothAncestor` is checked *before* any USB-group escalation so a wireless
   keyboard is never mistaken for an internal USB one (the BT radio itself is often a USB
   device sitting above it in the tree).
+- **For BLE, `BTHLEDEVICE\` is NOT the Bluetooth peripheral's own node - it's a GATT-service
+  child, one level below the true `BTHLE\` peripheral node.** Verified live against real
+  hardware (`Get-PnpDevice`): a BLE mouse's tree is `BTH\MS_BTHLE\...` (enumerator, never
+  touch) -> `BTHLE\DEV_<mac>\...` (the actual device, e.g. "MX Vertical") ->
+  `BTHLEDEVICE\{service-guid}..._<mac>\...` (one GATT service, e.g. the HID service) ->
+  `HID\{...}_COL0N\...` (the input leaf). Classic Bluetooth (`BTHENUM\`) has no such extra
+  layer. Both `UsbActions.GetBluetoothDeviceNode` and `BluetoothActions.FindInstanceIdByMac`
+  walk all the way up to `BTHLE\` for BLE devices - never stop at `BTHLEDEVICE\`, or you're
+  disabling a GATT service instead of the peripheral (Windows cascades a parent's disable to
+  its children, so this may still "work" by accident, but it's the wrong node).
+- **Bluetooth blocking falls back to `RemovePairing` (irreversible unpair) only when the new
+  MAC-to-instance-ID resolution can't find a matching PnP node** - never as the primary path
+  and never when the node WAS found but disabling it failed (that's a real failure, not an
+  unresolvable-device case, and must surface as such, not be masked by a silent unpair).
 - **`KSCATEGORY_CAPTURE` is deliberately NOT mapped to `video`** in `UsbKind.cs` - it is an
   audio+video capture category that onboard HD-audio codecs also register under
   (`wavemicin`, `wavespeaker`, HDMI-audio topology), so mapping it to video made a "block
@@ -381,10 +413,12 @@ what is and is not covered and why.
   Bluetooth-LE HID mouse's path collapsed to `"hid"`, which silently made every subsequent
   `CM_Locate_DevNodeW` fail).
 - **State files** (`whitelist.json`, `blacklist.json`, `disabled-devices.json`) live under
-  `~/.dlp` (same convention as the sibling agent's `~/.dlp/agent.db`/`machine.json` - this
-  binary always runs as that agent's child, so `~` resolves consistently) and are written
-  via a temp-file-then-atomic-rename (`File.Move(tmp, path, overwrite: true)`) - never write
-  them in place, a half-written file here would corrupt policy state on next load.
+  `%ProgramData%\DlpEndpointMonitor\` - machine-wide and user-agnostic, since this process
+  runs elevated and may run under a different effective user context (e.g. a service/SYSTEM
+  account) than the interactive user, where a per-user profile folder would resolve to the
+  wrong place. Written via a temp-file-then-atomic-rename (`File.Move(tmp, path,
+  overwrite: true)`) - never write them in place, a half-written file here would corrupt
+  policy state on next load.
 - **No test project, no CI yet.** Device-blocking and display-topology logic depend on
   real Win32/hardware state that is hard to fake - treat a careful reading of the code plus
   manual verification on a real machine as the actual test today (see AGENTS.md 8.1 /
@@ -399,6 +433,20 @@ what is and is not covered and why.
   `DeviceKindResolver` though - a device exposing ONLY an unlisted GUID is still invisible to
   the sweep entirely; this fix only helps devices that get enumerated but fail identity
   parsing (see PROJECT.md section 5.8).
+- **`DeviceKind.Network` is handled entirely by its own `Monitors/NetworkMonitor.cs`, never by
+  `UsbMonitor`** - a NIC is not a composite device and disabling one is catastrophic (it can be
+  the machine's only path back to the sibling dlp_v2 agent), so it does not fit `UsbMonitor`'s
+  per-interface / composite-group pipeline built for HID-style peripherals. `UsbMonitor`
+  explicitly excludes `Kind == Network` at every entry point (`OnDeviceChanged`,
+  `EnumerateExisting`, `BlockNonCompliant`, and its `byGroup` bucketing), and `NetworkMonitor`
+  is the sole consumer of `Kind == Network` - both monitors watch the same
+  `window.DeviceChanged` event and partition purely by resolved `Kind`. Before disabling any
+  network devnode, `NetworkMonitor.BlockDevice` calls `UsbActions.IsBuiltIn` (a public helper
+  factored out of `IsProtectedInternal`'s bus-ancestry walk) - internal/non-removable adapters
+  are never blocked, only an external/removable USB WiFi/Ethernet dongle is. This is the fix
+  for a real shipped bug: `IsProtectedInternal`'s first-line gate did not cover `Network`, so a
+  "block network kind" policy disabled the machine's own built-in WiFi/Ethernet adapter with no
+  protection at all (see PROJECT.md section 5.9 and bug history).
 
 ---
 
@@ -413,8 +461,9 @@ what is and is not covered and why.
 | How whitelist/blacklist enable/disable/mutate interact | `Handlers/Windows/WindowsUsbProtectionHandler.cs` |
 | How a device actually gets blocked/unblocked | `Monitors/UsbMonitor.cs` (`BlockDevice`, `RestoreCompliant`), `Actions/UsbActions.cs` |
 | How a composite device's siblings are judged together | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
-| How Bluetooth devices are matched/blocked | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` |
+| How Bluetooth devices are matched/blocked/restored | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`) |
 | How external displays are disabled/restored | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
+| How network adapters are matched/blocked/restored, and how the built-in NIC is protected | `Monitors/NetworkMonitor.cs`, `Actions/UsbActions.cs` (`IsBuiltIn`) |
 | Windows interface GUID -> DeviceKind mapping | `Core/UsbKind.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |

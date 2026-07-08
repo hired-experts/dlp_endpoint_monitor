@@ -1,10 +1,11 @@
 # Test plan for the device-blocking engine
 
 **Status: section 2 is implemented.** `DlpEndpointMonitor.Tests/` (xUnit) covers every case
-in section 2 below - 75 tests, all passing (`dotnet test DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj`).
+in section 2 below - 78 tests, all passing (`dotnet test DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj`).
 The storage-directory seam mentioned in section 2.5.1 was added (an optional constructor
 parameter on `UsbDeviceList`/`DeviceWhitelist`/`DeviceBlacklist`/`DisabledDevices`, defaulting
-to the exact prior `~/.dlp` behavior - see `ai_agent_doc/PROJECT.md` section 6), so 2.5 is
+to the exact prior `%ProgramData%\DlpEndpointMonitor\` behavior - see `ai_agent_doc/PROJECT.md`
+section 6), so 2.5 is
 fully covered too, not skipped. Sections 3 and 4 remain exactly as originally written - still
 manual/hardware-only, still not attempted. This file is kept as the living reference for what
 each layer covers and why; section 2's case tables now double as a map from test file to case
@@ -23,7 +24,7 @@ remain manual/not implemented. Splitting by how much the Win32 layer gets in the
 | `Actions/UsbActions.cs` parsing (`ParseDevicePath`, `ParsePartialDevice`, `ToInstanceId`) | **Yes** | Pure regex/string logic over a path you can hand it directly. |
 | `Actions/BluetoothActions.cs` parsing (`ParseMacFromPath`, `ParseKindFromPath`, `FormatAddress`, `GetKindFromCoD`, `FormatHexMac`/`ParseMacToUllLong`) | **Yes** | Pure string/bit manipulation, no live radio needed. |
 | `Actions/DisplayActions.cs` (`ParseMonitorPath`) | **Yes** | Pure regex over a path string. |
-| `Core/UsbDeviceList.cs` / `UsbWhitelist.cs` / `UsbBlacklist.cs` matching + dedup (`MatchesAnyUsb`, `MatchesAnyBt`, `SameDevice`, `Add`/`Remove`/`Set`) | **Yes** (seam added - see 2.5.1) | Pure in-memory logic; the storage directory is now an optional constructor parameter (defaults to `~/.dlp`), so a test can point at a throwaway temp directory instead of the real files. |
+| `Core/UsbDeviceList.cs` / `UsbWhitelist.cs` / `UsbBlacklist.cs` matching + dedup (`MatchesAnyUsb`, `MatchesAnyBt`, `SameDevice`, `Add`/`Remove`/`Set`) | **Yes** (seam added - see 2.5.1) | Pure in-memory logic; the storage directory is now an optional constructor parameter (defaults to `%ProgramData%\DlpEndpointMonitor\`), so a test can point at a throwaway temp directory instead of the real files. |
 | `Core/CommandDispatcher.cs` dispatch/error handling | **Yes** | Already takes `IClipboardHandler`/`IUsbStorageHandler`/`IUsbDeviceHandler`/`IUsbProtectionHandler`/`IControlHandler` as constructor parameters - a test can hand it fakes with zero production changes. |
 | `Core/EventEmitter.cs` (`Emit`, `EmitError`, `EmitInfo`) | **Yes** | Writes to `Console.Out`, which `Console.SetOut(...)` can redirect in a test - standard .NET technique, no production change. |
 | `Core/SchemaExporter.cs` (`--schema` output) | **Yes** | Pure reflection + JSON generation over a `TextWriter` you supply. |
@@ -85,6 +86,14 @@ want that automated later - not proposed for now, since you asked for no code.
 | T-BT-08 | `GetKindFromCoD` with major `0x04` (audio/video), `0x06` (imaging), `0x03` (network) | `Audio`, `Camera`, `Network` respectively |
 | T-BT-09 | `GetKindFromCoD` with an unrecognized major class | Returns `Unknown` |
 | T-BT-10 | `ParseKindFromPath` on a path whose interface GUID suffix is a known GUID | Resolves through `DeviceKindResolver.Resolve` correctly |
+| T-BT-11 | `ParseMacFromPath` on a BLE top-level peripheral's raw instance ID (`BTHLE\DEV_<mac>\...`) | Returns the canonical MAC - verified live against real hardware (PROJECT.md section 5.5) |
+| T-BT-12 | `ParseMacFromPath` on the same BLE peripheral as a live device-interface PATH (`#`-separated, not `\`) | Returns the same canonical MAC - confirms tolerance for both separator forms |
+| T-BT-13 (regression guard) | `ParseMacFromPath` on a `BTHLEDEVICE\` GATT-service-child path (NOT the true top-level peripheral) | Returns `null` - must never be mistaken for the peripheral's own node (see PROJECT.md section 5.5's verified 3-level BLE hierarchy) |
+
+**Added, not automatable** (Win32-calling, per section 1's feasibility table):
+`BluetoothActions.FindInstanceIdByMac` (walks the BTHENUM/BTHLE PnP tree via SetupAPI) and
+`UsbActions.GetBluetoothDeviceNode`'s BLE-depth fix - both need real paired hardware. See the
+manual matrix (section 3) for the corresponding cases.
 
 ### 2.4 Display path parsing (`Actions/DisplayActions.cs`)
 
@@ -118,14 +127,14 @@ want that automated later - not proposed for now, since you asked for no code.
 #### 2.5.1 Resolved: the storage-path seam
 
 `UsbDeviceList`'s constructor now accepts an optional `storageDir` parameter (defaulting to
-`Environment.GetFolderPath(UserProfile) + ".dlp"`, identical to the prior hardcoded behavior
-when omitted - see `ai_agent_doc/PROJECT.md` section 6), threaded through
-`DeviceWhitelist`/`DeviceBlacklist`, plus the equivalent parameter on `DisabledDevices`. Every
-test in `DlpEndpointMonitor.Tests/UsbDeviceListTests.cs` constructs its own throwaway
-`Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))` directory, deleted in a
-`finally` block, and never uses the default (no-argument) constructor - so these tests never
-touch the real `~/.dlp`. Every production call site (`Program.cs`) still uses the
-parameterless form and is unaffected.
+`Environment.GetFolderPath(CommonApplicationData) + "\DlpEndpointMonitor"`, identical to the
+prior hardcoded behavior when omitted - see `ai_agent_doc/PROJECT.md` section 6), threaded
+through `DeviceWhitelist`/`DeviceBlacklist`, plus the equivalent parameter on
+`DisabledDevices`. Every test in `DlpEndpointMonitor.Tests/UsbDeviceListTests.cs` constructs
+its own throwaway `Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))` directory,
+deleted in a `finally` block, and never uses the default (no-argument) constructor - so these
+tests never touch the real storage location. Every production call site (`Program.cs`) still
+uses the parameterless form and is unaffected.
 
 T-LIST-01..15 below are now implemented as automated tests, with no risk of production-file
 corruption on whatever machine runs them.
@@ -202,12 +211,34 @@ test script - what to set up, what to trigger, what to check in the JSON event s
 |---|---|---|---|
 | M-REG-01 | Built-in laptop keyboard/touchpad, whitelist enabled with unrelated entries | (No physical action possible - policy alone) | Never blocked, regardless of policy - `IsProtectedInternal`'s `StrictInputKinds` path |
 | M-REG-02 | Built-in webcam, whitelist enabled without a camera entry | N/A | Blocked as normal - camera/video are NOT protected kinds |
-| M-REG-03 | Bluetooth-backed HID device that needs blocking | Blacklist it | Disabled at the `BTHLEDEVICE\`/`BTHENUM\` peripheral node, not the HID leaf, not the shared radio - other BT devices on the same radio stay unaffected |
+| M-REG-03 | Bluetooth-backed HID device that needs blocking | Blacklist it | Disabled at the `BTHENUM\` (classic) or `BTHLE\` (BLE - NOT `BTHLEDEVICE\`, one level too shallow) peripheral node, not the HID leaf, not the shared radio - other BT devices on the same radio stay unaffected |
 | M-REG-04 | A USB HID device that Windows vetoes at both the leaf and group-disable level | Blacklist it | Falls through to `CM_Request_Device_EjectW`; confirm the eject actually disconnects it and that no `CM_Enable` is attempted afterward (irreversible by design) |
 | M-REG-05 | External monitor connected, whitelist blocks it, unplug and replug rapidly (regression for the `WM_DISPLAYCHANGE` debounce fix) | Rapid connect/disconnect cycling | No crash (`ObjectDisposedException`), the debounce settles and correctly reflects final state |
 | M-REG-06 | Whitelist AND blacklist both somehow enabled on disk (direct file edit) | Start the process | Both force-disabled at startup, `startup_conflict` error event emitted |
 | M-REG-07 | Whitelist enabled with entries, then `device_whitelist_clear` | Observe | List disabled (not just emptied) - "factory reset" semantics - and all previously-blocked devices get restored |
 | M-REG-08 | `usb_disable_storage`/`usb_enable_storage`/`usb_storage_status` | Toggle each | `HKLM\...\USBSTOR!Start` flips between `4`/`3` correctly - **this one IS runnable in CI on any Windows agent**, no special hardware needed (plain registry read/write) |
+
+### 3.4 Bluetooth reversible blocking + Display restore (this session's fix)
+
+| # | Setup | Action | Expected |
+|---|---|---|---|
+| M-BT-01 (BLE, verified live this session) | A BLE-paired mouse (e.g. an MX-series Logitech mouse) | Blacklist its MAC or kind | Windows still shows it as **paired** (Settings > Bluetooth), just non-functional - confirms disable, not unpair. `bluetooth_device_blocked` event, no `bluetooth_device_disconnected` unpair side effect |
+| M-BT-02 (BLE restore) | Continuing from M-BT-01 | Clear the blacklist entry | Device reconnects and works again **without re-pairing** - `bluetooth_device_unblocked` event fires |
+| M-BT-03 (classic BT - not yet live-verified, see section 1) | A classic-Bluetooth-paired device (not BLE) | Blacklist it, then clear | Same disable/restore behavior as M-BT-01/02 - **this is the one path in this fix that hasn't been confirmed against real hardware yet** |
+| M-BT-04 (fallback) | Force `FindInstanceIdByMac` to fail (e.g. temporarily point its enumerator search at a wrong branch name) for a device that needs blocking | Blacklist it | Falls back to the old unpair - device still gets blocked (via `BluetoothDeviceBlockedEvent`), just irreversibly for that one device; confirms blocking never silently no-ops |
+| M-BT-05 (live BLE reconnect) | A BLE device already blacklisted, currently out of range/powered off | Bring it back into range/power it on | `BluetoothMonitor.OnDeviceChanged` recognizes the `BTHLE` path immediately (not just on the next periodic sweep) and blocks it right away - regression guard for the live-arrival filter fix |
+| M-DISP-01 | External monitor connected, whitelist blocks it | Disable whitelist | Event log shows either a genuine `monitor_policy_restore: external displays re-enabled` (and the monitor actually comes back) or a real error from `SetDisplayConfig` - never a false "re-enabled" claim when it silently failed (the confirmed, now-fixed bug) |
+| M-DISP-02 (only if M-DISP-01's `SetDisplayConfig` genuinely fails) | Same as M-DISP-01 | Same | Confirms the deferred symmetric-reactivation redesign (section 5.6/PROJECT.md) is actually needed - not expected to pass yet, this case exists to decide if that follow-up work is warranted |
+
+### 3.5 Network adapter blocking (`NetworkMonitor` / `UsbActions.IsBuiltIn` fix)
+
+| # | Setup | Action | Expected |
+|---|---|---|---|
+| M-NET-01 (external USB dongle block) | A USB WiFi or USB Ethernet dongle plugged in | Blacklist it by kind=network (or its VID/PID) | `network_device_blocked` event fires, the dongle's devnode is disabled (Device Manager shows it disabled), and the machine's other network path (if any) stays up |
+| M-NET-02 (external USB dongle restore) | Continuing from M-NET-01 | Clear the blacklist entry (or remove the rule) | `network_device_unblocked` event fires and the dongle re-enables and reconnects, same restore semantics as M-BT-02 |
+| M-NET-03 (built-in adapter never blocked - the regression this fix exists for) | Blacklist `kind: network` broadly (no VID/PID scoping), on a machine whose only adapter is a built-in WiFi/Ethernet (PCIe or soldered, not USB) | Observe | Built-in adapter stays enabled and connected throughout - `network_device_block_failed` event fires with `error: "protected internal network adapter - refused to block"` instead of a disable ever being attempted; this is the confirmed, now-fixed collateral-WiFi-disable bug ("previously it disable the wifi driver, the network wifi adapter") |
+| M-NET-04 (Bluetooth-tethered/PAN network interface, if available) | A Bluetooth PAN (Bluetooth-tethering) network interface is present | Blacklist `kind: network` | `NetworkMonitor` still applies (interface resolves to `DeviceKind.Network`), but `UsbActions.IsBuiltIn` treats it as external via the Bluetooth-ancestor check same as M-NET-01, not confused with the internal-adapter path |
+| M-NET-05 (no duplicate Bluetooth restore events) | A Bluetooth device blacklisted and then unblocked (same setup as M-BT-01/M-BT-02) | Clear the blacklist entry | Exactly **one** `bluetooth_device_unblocked` event fires for the device - not also a second `usb_device_unblocked` for the same devnode; confirms `UsbMonitor.RestoreCompliant`'s new `d.Mac is null && d.Kind != DeviceKind.Network` filter stops it from racing `BluetoothMonitor.RestoreCompliant` on the same shared `DisabledDevices` record |
 
 ---
 
@@ -232,7 +263,7 @@ discussion, not something to fold into "just add tests."
 ## 5. Suggested priority if you want to act on this incrementally
 
 1. ~~Section 2's pure-logic cases (2.1-2.4, 2.6-2.8)~~ - **done**: `DlpEndpointMonitor.Tests/`,
-   75 passing tests.
+   78 passing tests.
 2. ~~Section 2.5's list-matching cases~~ - **done**: the storage-path seam (2.5.1) was added,
    so 2.5 is fully automated too, not skipped.
 3. Section 3's manual matrix - still to run by hand, as the actual acceptance test for the

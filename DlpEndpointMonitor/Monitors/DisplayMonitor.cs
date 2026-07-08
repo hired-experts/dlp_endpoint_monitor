@@ -153,10 +153,11 @@ sealed class DisplayMonitor : IDisposable
 
             if (!anyBlocked)
             {
-                var (_, error) = DisplayActions.EnableExternalDisplays();
-                if (error is not null)
-                    EventEmitter.EmitError("monitor_policy_restore", error);
-                EventEmitter.EmitInfo("monitor_policy_restore: external displays re-enabled");
+                var (ok, error) = DisplayActions.EnableExternalDisplays();
+                if (ok)
+                    EventEmitter.EmitInfo("monitor_policy_restore: external displays re-enabled");
+                else
+                    EventEmitter.EmitError("monitor_policy_restore", error ?? "EnableExternalDisplays failed");
             }
             else
             {

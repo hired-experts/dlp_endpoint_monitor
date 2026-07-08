@@ -60,5 +60,15 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(BluetoothDeviceDisconnectedEvent))]
 [JsonSerializable(typeof(BluetoothDeviceBlockedEvent))]
 [JsonSerializable(typeof(BluetoothDeviceBlockFailedEvent))]
+[JsonSerializable(typeof(BluetoothDeviceUnblockedEvent))]
+[JsonSerializable(typeof(BluetoothDeviceUnblockFailedEvent))]
+
+// ── Network ───────────────────────────────────────────────────────────────────
+[JsonSerializable(typeof(NetworkDeviceConnectedEvent))]
+[JsonSerializable(typeof(NetworkDeviceDisconnectedEvent))]
+[JsonSerializable(typeof(NetworkDeviceBlockedEvent))]
+[JsonSerializable(typeof(NetworkDeviceBlockFailedEvent))]
+[JsonSerializable(typeof(NetworkDeviceUnblockedEvent))]
+[JsonSerializable(typeof(NetworkDeviceUnblockFailedEvent))]
 
 internal partial class AppJsonContext : JsonSerializerContext { }

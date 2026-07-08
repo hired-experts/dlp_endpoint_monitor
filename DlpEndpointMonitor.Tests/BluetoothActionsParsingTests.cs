@@ -30,6 +30,49 @@ public class BluetoothActionsParsingTests
         Assert.Null(mac);
     }
 
+    // T-BT-11: BLE top-level peripheral's own instance ID (backslash form, as returned by
+    // SetupDiGetDeviceInstanceId) - verified live against real hardware this session
+    // (PROJECT.md section 5.5). Classic regex doesn't match this format at all, so this
+    // exercises the BLE fallback branch added to ParseMacFromPath.
+    [Fact]
+    public void ParseMacFromPath_BleTopLevelInstanceId_ReturnsCanonicalMac()
+    {
+        const string instanceId = @"BTHLE\DEV_D15799812BE4\7&257494de&0&d15799812be4";
+
+        string? mac = BluetoothActions.ParseMacFromPath(instanceId);
+
+        Assert.Equal("D1:57:99:81:2B:E4", mac);
+    }
+
+    // T-BT-12: same BLE peripheral, but as a live device-interface PATH (Windows replaces the
+    // top-level '\' separators with '#') - confirms the [\\#] tolerance in _bleTopLevelMac,
+    // the same ambiguity _macInPath already handles for classic paths.
+    [Fact]
+    public void ParseMacFromPath_BleTopLevelInterfacePath_ReturnsCanonicalMac()
+    {
+        const string path = @"\\?\BTHLE#DEV_D15799812BE4#7&257494de&0&d15799812be4#{guid}";
+
+        string? mac = BluetoothActions.ParseMacFromPath(path);
+
+        Assert.Equal("D1:57:99:81:2B:E4", mac);
+    }
+
+    // T-BT-13 (regression guard): a BTHLEDEVICE child path (a GATT service, NOT the true
+    // top-level peripheral - see PROJECT.md section 5.5's verified 3-level BLE hierarchy)
+    // must NOT match the BLE regex - it has no "DEV_<12-hex>" substring of its own (the
+    // literal "DEV_" in its instance ID is immediately followed by "VID&...", not hex digits).
+    // If this ever starts matching, FindInstanceIdByMac would resolve to the wrong node.
+    [Fact]
+    public void ParseMacFromPath_BleGattServiceChildPath_ReturnsNull()
+    {
+        const string path =
+            @"BTHLEDEVICE\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02046D_PID&B020_REV&0009_D15799812BE4\8&65B57F4&0&0021";
+
+        string? mac = BluetoothActions.ParseMacFromPath(path);
+
+        Assert.Null(mac);
+    }
+
     // T-BT-03 (ADAPTED): the plan describes a FormatAddress/ParseMacToUllLong round trip, but
     // ParseMacToUllLong is a private helper only reachable through RemovePairing, which invokes
     // the real BluetoothRemoveDevice P/Invoke (a genuine hardware side effect, not unit-testable

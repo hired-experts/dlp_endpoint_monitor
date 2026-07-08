@@ -225,4 +225,54 @@ public record BluetoothDeviceBlockFailedEvent(string Mac, DeviceKind Kind, strin
 {
     public EventType Type => EventType.BluetoothDeviceBlockFailed;
 }
+
+[JsonDiscriminant(EventType.BluetoothDeviceUnblocked)]
+public record BluetoothDeviceUnblockedEvent(string Mac, DeviceKind Kind, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceUnblocked;
+}
+
+[JsonDiscriminant(EventType.BluetoothDeviceUnblockFailed)]
+public record BluetoothDeviceUnblockFailedEvent(string Mac, DeviceKind Kind, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.BluetoothDeviceUnblockFailed;
+}
+#endregion
+
+#region Network
+[JsonDiscriminant(EventType.NetworkDeviceConnected)]
+public record NetworkDeviceConnectedEvent(string? Vid, string? Pid, string? Serial, int? UsbClass, string? NativeClass, string DevicePath, bool Allowed, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceConnected;
+}
+
+[JsonDiscriminant(EventType.NetworkDeviceDisconnected)]
+public record NetworkDeviceDisconnectedEvent(string? Vid, string? Pid, string? Serial, string DevicePath, int? UsbClass, string? NativeClass, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceDisconnected;
+}
+
+[JsonDiscriminant(EventType.NetworkDeviceBlocked)]
+public record NetworkDeviceBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceBlocked;
+}
+
+[JsonDiscriminant(EventType.NetworkDeviceBlockFailed)]
+public record NetworkDeviceBlockFailedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceBlockFailed;
+}
+
+[JsonDiscriminant(EventType.NetworkDeviceUnblocked)]
+public record NetworkDeviceUnblockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceUnblocked;
+}
+
+[JsonDiscriminant(EventType.NetworkDeviceUnblockFailed)]
+public record NetworkDeviceUnblockFailedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.NetworkDeviceUnblockFailed;
+}
 #endregion

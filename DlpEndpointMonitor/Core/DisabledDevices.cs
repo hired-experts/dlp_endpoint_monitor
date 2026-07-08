@@ -3,12 +3,16 @@ using System.Text.Json;
 namespace DlpEndpointMonitor.Core;
 
 /// <summary>
-/// A USB device this process disabled via CM_Disable_DevNode, with enough context to
-/// reconcile it against policy later. <see cref="InstanceId"/> is the exact devnode that
-/// was disabled (the interface node, the composite parent, whichever succeeded).
+/// A USB or Bluetooth device this process disabled via CM_Disable_DevNode, with enough
+/// context to reconcile it against policy later. <see cref="InstanceId"/> is the exact devnode
+/// that was disabled (the interface node, the composite parent, the Bluetooth peripheral node,
+/// whichever succeeded). <see cref="Mac"/> is set only for a Bluetooth-blocked device (mirrors
+/// <see cref="UsbDeviceEntry"/>'s existing precedent of carrying both USB and Bluetooth
+/// identity side by side) - <c>Vid</c>/<c>Pid</c> are empty strings in that case, since a
+/// Bluetooth device has no USB vendor/product ID.
 /// </summary>
 public sealed record DisabledDeviceRecord(
-    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind);
+    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind, string? Mac = null);
 
 internal sealed class DisabledDevicesState
 {
@@ -25,24 +29,20 @@ internal sealed class DisabledDevicesState
 /// </summary>
 sealed class DisabledDevices
 {
-    // ~/.dlp - same convention the sibling Node.js agent uses for its own state, and the
-    // same directory UsbDeviceList persists whitelist/blacklist under (Core/UsbDeviceList.cs).
-    static readonly string DefaultStorageDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".dlp");
-
     readonly ReaderWriterLockSlim _lock = new();
     readonly string               _storageDir;
     readonly string               _storagePath;
     DisabledDevicesState          _state = new();
 
     /// <param name="storageDir">
-    /// Directory to persist under. Defaults to ~/.dlp (identical to the previous hardcoded
-    /// behavior) when null - pass an explicit directory only to isolate storage, e.g. in tests.
+    /// Directory to persist under. Defaults to <see cref="StorageLocation.Default"/>
+    /// (%ProgramData%\DlpEndpointMonitor, same directory UsbDeviceList persists
+    /// whitelist/blacklist under) when null - pass an explicit directory only to isolate
+    /// storage, e.g. in tests.
     /// </param>
     public DisabledDevices(string? storageDir = null)
     {
-        _storageDir  = storageDir ?? DefaultStorageDir;
+        _storageDir  = storageDir ?? StorageLocation.Default;
         _storagePath = Path.Combine(_storageDir, "disabled-devices.json");
         Load();
     }

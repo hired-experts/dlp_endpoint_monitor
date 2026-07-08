@@ -16,14 +16,6 @@ abstract class UsbDeviceList
 {
     // ── Persistence ───────────────────────────────────────────────────────────
 
-    // ~/.dlp - same convention the sibling Node.js agent uses for its own state
-    // (~/.dlp/agent.db, ~/.dlp/machine.json). This binary is always launched as a child
-    // process of that agent (or run interactively by a developer), so "~" reliably
-    // resolves to the same user profile the agent itself already writes under.
-    static readonly string DefaultStorageDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        ".dlp");
-
     // ── In-memory state ───────────────────────────────────────────────────────
 
     readonly ReaderWriterLockSlim _lock        = new();
@@ -32,12 +24,13 @@ abstract class UsbDeviceList
     UsbDeviceListState            _state       = new();
 
     /// <param name="storageDir">
-    /// Directory to persist under. Defaults to ~/.dlp (identical to the previous hardcoded
-    /// behavior) when null - pass an explicit directory only to isolate storage, e.g. in tests.
+    /// Directory to persist under. Defaults to <see cref="StorageLocation.Default"/>
+    /// (%ProgramData%\DlpEndpointMonitor) when null - pass an explicit directory only to
+    /// isolate storage, e.g. in tests.
     /// </param>
     protected UsbDeviceList(string fileName, string? storageDir = null)
     {
-        _storageDir  = storageDir ?? DefaultStorageDir;
+        _storageDir  = storageDir ?? StorageLocation.Default;
         _storagePath = Path.Combine(_storageDir, fileName);
         Load();
     }

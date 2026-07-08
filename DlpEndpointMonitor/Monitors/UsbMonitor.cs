@@ -64,6 +64,11 @@ sealed class UsbMonitor : IDisposable
                 string     classGuid = iface.dbcc_classguid.ToString("B"); // "B" = {xxxxxxxx-...} with braces
                 DeviceKind kind      = DeviceKindResolver.Resolve(classGuid, out int? usbClass);
 
+                // Network devices (NICs) are handled exclusively by NetworkMonitor - a NIC is not
+                // composite and disabling one is catastrophic, so it does not fit this monitor's
+                // per-interface / composite-group pipeline.
+                if (kind == DeviceKind.Network) return;
+
                 // Try full parse (VID/PID). Fall back to partial parse (instance ID only,
                 // no VID/PID) so kind-based policy entries still match USBSTOR devices.
                 var parsed = UsbActions.ParseDevicePath(devicePath)
@@ -107,7 +112,8 @@ sealed class UsbMonitor : IDisposable
     {
         try
         {
-            foreach (var parsed in UsbActions.EnumerateConnected())
+            // Network devices (NICs) are NetworkMonitor's exclusive territory - see OnDeviceChanged.
+            foreach (var parsed in UsbActions.EnumerateConnected().Where(p => p.Kind != DeviceKind.Network))
                 HandleArrival(parsed);
         }
         catch (Exception ex)
@@ -125,7 +131,8 @@ sealed class UsbMonitor : IDisposable
     {
         try
         {
-            var all = UsbActions.EnumerateConnected().ToList();
+            // Network devices (NICs) are NetworkMonitor's exclusive territory - see OnDeviceChanged.
+            var all = UsbActions.EnumerateConnected().Where(p => p.Kind != DeviceKind.Network).ToList();
 
             // Bucket by composite-group so every sibling interface is judged together, not
             // one at a time - this is what BlockDevice's own group check also does, done here
@@ -136,7 +143,7 @@ sealed class UsbMonitor : IDisposable
             // instance ID (the radio commonly sits above BTHENUM/BTHLEDEVICE in the tree), so
             // grouping by raw GroupId there would wrongly lump unrelated devices together.
             var byGroup = all
-                .Where(d => d.GroupId is not null && !UsbActions.HasBluetoothAncestor(d.InstanceId))
+                .Where(d => d.GroupId is not null && !UsbActions.HasBluetoothAncestor(d.InstanceId) && d.Kind != DeviceKind.Network)
                 .GroupBy(d => d.GroupId!, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(g => g.Key, g => (IReadOnlyList<ParsedDevice>)g.ToList(), StringComparer.OrdinalIgnoreCase);
 
@@ -368,7 +375,13 @@ sealed class UsbMonitor : IDisposable
         try
         {
             int restored = 0, stillBlocked = 0;
-            foreach (var d in _disabled.GetAll())
+            // Mac is not null -> a Bluetooth-blocked record, owned exclusively by
+            // BluetoothMonitor.RestoreCompliant; Kind==Network -> owned exclusively by
+            // NetworkMonitor.RestoreCompliant. Without this filter, a shared record could be
+            // re-enabled by two monitors racing on the same devnode, each emitting its own
+            // "unblocked" event for one restore action (a second, independently-discovered bug
+            // bundled into this change - see AGENTS.md/PROJECT.md bug history).
+            foreach (var d in _disabled.GetAll().Where(d => d.Mac is null && d.Kind != DeviceKind.Network))
             {
                 bool allowed = IsRecordCompliant(d);
                 if (!allowed) { stillBlocked++; continue; }

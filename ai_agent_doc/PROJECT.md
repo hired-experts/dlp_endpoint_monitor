@@ -455,14 +455,45 @@ Outcome handling per record is unchanged from before:
 This whole mechanism is what makes "unblock re-enables the device" correct even when the
 process restarted between the block and the unblock - the record survives on disk.
 
-### 5.5 Bluetooth blocking (`BluetoothMonitor`, no restore)
+### 5.5 Bluetooth blocking (`BluetoothMonitor`, reversible disable with unpair fallback)
 
-Blocking a Bluetooth device is `BluetoothActions.RemovePairing(mac)` ->
-`BluetoothRemoveDevice`. This **unpairs** the device outright - it is not a reversible
-disable, so there is no Bluetooth entry in `DisabledDevices` and no Bluetooth restore path.
-Loosening a Bluetooth blacklist/whitelist does not bring a removed pairing back; the user
-must re-pair manually. Keep this asymmetry in mind - it is intentional, not a missing
-feature.
+Blocking a Bluetooth device disables its own PnP node (`UsbActions.DisableDevice`, the same
+mechanism USB devices use) rather than unpairing it - the device stays paired but
+non-functional, and `BluetoothMonitor.RestoreCompliant` can bring it back automatically once
+policy allows it again, symmetric with USB. `BluetoothActions.FindInstanceIdByMac(mac)`
+resolves the MAC address the classic Bluetooth API gives us (`BluetoothFindFirstDevice`/
+`BluetoothFindNextDevice`, used by `EnumerateConnected`) to a PnP instance ID, since that API
+never exposes one directly - it walks the `BTHENUM` (classic) and `BTHLE` (BLE) PnP enumerator
+branches directly via `SetupDiGetClassDevsByEnumerator`/`SetupDiEnumDeviceInfo` (device
+*nodes*, not interfaces) and matches by MAC embedded in each node's own instance ID.
+
+**Verified BLE device tree is three levels deep, one more than classic Bluetooth** (confirmed
+live via `Get-PnpDevice`/`Get-PnpDeviceProperty` against real hardware):
+```
+BTH\MS_BTHLE\...                                  (enumerator driver - never touch)
+  -> BTHLE\DEV_<MAC>\...                           (true peripheral node, e.g. "MX Vertical")
+       -> BTHLEDEVICE\{service-guid}_..._<MAC>\... (one GATT service child, e.g. the HID service)
+            -> HID\{...}_..._COL0N\...             (the actual input-delivering leaf)
+```
+`BTHLEDEVICE\` is **not** the peripheral - it is a GATT-service child, one level below the
+true `BTHLE\` node. Both `BluetoothActions.FindInstanceIdByMac` and
+`UsbActions.GetBluetoothDeviceNode` (the sibling mechanism `UsbMonitor` uses for
+Bluetooth-backed HID devices arriving via their own HID interface) walk all the way up to
+`BTHLE\`, never stopping at `BTHLEDEVICE\`. Classic Bluetooth (`BTHENUM\`) has no such extra
+layer - its own node is where both functions stop directly.
+
+**Fallback, not a guarantee**: if `FindInstanceIdByMac` can't find a matching node (an
+unusual device, a profile this hasn't been verified against), `BlockDevice` falls back to the
+old `RemovePairing` unconditionally - the device is still blocked, just via the irreversible
+path for that one device, rather than silently leaving a non-compliant device connected. A
+disable that genuinely *fails* after the node *was* found does not fall back to unpair - that
+would mask a real failure as an unresolvable-device case.
+
+`DisabledDeviceRecord` carries an optional `Mac` (mirroring `UsbDeviceEntry`'s existing
+USB/Bluetooth side-by-side identity pattern) so `RestoreCompliant` can tell a
+Bluetooth-disabled record apart from a USB one in the same persisted list. A device blocked
+via the unpair fallback has no record and cannot be restored in software - re-pairing is
+manual, same as before this change.
 
 ### 5.6 Display/monitor blocking (`DisplayMonitor`, `DisplayActions`)
 
@@ -478,7 +509,14 @@ topology back to the laptop panel regardless of current state.
 
 `RestoreCompliant` re-enables extended desktop (`SDC_TOPOLOGY_EXTEND`) only if **no**
 currently-connected monitor is non-compliant - if even one blocked monitor is still
-plugged in, it stays blocked (logged, not restored).
+plugged in, it stays blocked (logged, not restored). `EnableExternalDisplays` returns the
+real `SetDisplayConfig` result (`ok = result == 0`) - it used to hardcode `ok = true`
+regardless of outcome, so a failure was logged as an error but `RestoreCompliant` still
+claimed "external displays re-enabled" right after. If a user reports the external display
+still not coming back after this fix, the next step is a symmetric redesign - explicitly
+re-query and reactivate the specific external path(s) instead of the blunt
+`SDC_TOPOLOGY_EXTEND` auto-topology switch, mirroring `DisableExternalDisplays` in reverse -
+not implemented, since it's unverifiable without a real external monitor to test against.
 
 `WM_DISPLAYCHANGE` is debounced 800ms (`DisplayMonitor.OnDisplayChanged`) because Windows
 fires it repeatedly while HDMI-audio interfaces cycle during a topology switch. The
@@ -541,27 +579,72 @@ exposes *only* a class GUID outside that table is never even attempted by
 enumerated but then failed identity parsing). Fixing that would mean enumerating without an
 interface-class filter at all - a materially bigger, separate change.
 
+### 5.9 Network blocking (`NetworkMonitor`, own monitor, own protection default)
+
+`DeviceKind.Network` (`GUID_DEVINTERFACE_NET`) is exposed by any NDIS adapter - a built-in
+PCIe WiFi/Ethernet card exactly as much as a USB dongle - so it cannot be run through
+`UsbMonitor`'s generic per-interface / composite-group pipeline: that pipeline was designed
+for HID-style peripherals, has no concept that fits "the machine's only network path," and
+disabling a NIC is not reversible-by-replug the way an input device is (there is no fallback
+eject/escalation ladder that makes sense for a NIC). Instead, `Monitors/NetworkMonitor.cs`
+owns every `Kind == Network` device exclusively, structurally mirroring `BluetoothMonitor`
+(no composite-group concept, one whitelist/blacklist check per device, its own
+`RestoreCompliant`) rather than `UsbMonitor`:
+
+- `UsbMonitor.OnDeviceChanged`/`EnumerateExisting`/`BlockNonCompliant` all explicitly exclude
+  `Kind == Network` (including from the `byGroup` bucketing Where-clause) - both monitors
+  observe the identical `window.DeviceChanged` event stream and partition purely by the
+  `DeviceKind` that `DeviceKindResolver.Resolve` returns, so a network interface is never
+  double-handled.
+- **Safety default**: `NetworkMonitor.BlockDevice` calls `UsbActions.IsBuiltIn(instanceId)`
+  *before* any `DisableDevice` call - if the adapter is internal (no Bluetooth ancestor, and
+  either no USB ancestor at all or a non-removable USB ancestor), the block is refused and a
+  `NetworkDeviceBlockFailedEvent` is emitted with `error: "protected internal network adapter
+  - refused to block"`. This is the single most important line in the whole feature: it is
+  what stops a "block network kind" blacklist rule from disabling the machine's own
+  WiFi/Ethernet and stranding it with no way to report back to the sibling dlp_v2 agent.
+- `UsbActions.IsBuiltIn` is a new public helper factored out of the bus-ancestry walk that
+  `IsProtectedInternal` already did inline (Bluetooth-ancestor check first, since a Bluetooth
+  radio is frequently itself a USB device sitting above the BTH nodes in the tree; otherwise
+  fall back to USB-group non-removability; no bus ancestor at all -> internal). `Network` is
+  deliberately **not** added to `IsProtectedInternal`'s `StrictInputKinds` set - it gets its
+  own call site in `NetworkMonitor` instead, so `IsProtectedInternal`'s existing behavior for
+  Keyboard/Mouse/Hid/Hub/Unknown is completely unchanged.
+- External/removable network adapters (a USB WiFi/Ethernet dongle) remain fully blockable -
+  this is a real DLP use case (blocking a rogue USB network adapter used to bypass
+  monitoring/exfiltrate data over an unmanaged network path).
+- No composite-group concept, no eject fallback: `BlockDevice` is a single `DisableDevice`
+  call, tracked in `DisabledDevices` the same shape as a plain USB record (`Mac` stays null).
+  `RestoreCompliant` filters to `d.Mac is null && d.Kind == DeviceKind.Network` so it only
+  ever touches records it owns - see the bug this shares its root cause with, below.
+- New wire events, additive to the existing `usb_device_*`/`bluetooth_device_*` precedent:
+  `network_device_connected`, `network_device_disconnected`, `network_device_blocked`,
+  `network_device_block_failed`, `network_device_unblocked`, `network_device_unblock_failed`.
+
 ---
 
 ## 6. Persistence
 
-Three JSON files under `~/.dlp` (`Environment.SpecialFolder.UserProfile`, the same
-convention the sibling Node.js agent uses for its own `~/.dlp/agent.db` and
-`~/.dlp/machine.json` - this binary is always launched as that agent's child process, or run
-interactively by a developer, so `~` reliably resolves to the same profile either way):
-`whitelist.json`, `blacklist.json`, `disabled-devices.json`. (Moved here from
-`%ProgramData%\DlpEndpointMonitor\` - no migration was needed since there were no real
-deployments yet at the time of the move.)
+Three JSON files under `%ProgramData%\DlpEndpointMonitor\`
+(`Environment.SpecialFolder.CommonApplicationData`): `whitelist.json`, `blacklist.json`,
+`disabled-devices.json`. Machine-wide and user-agnostic on purpose - this process runs
+elevated and may be launched under a different effective user context (e.g. a service/SYSTEM
+account) than the interactive user, in which case a per-user profile folder
+(`Environment.SpecialFolder.UserProfile`, i.e. `~`) would resolve to the wrong place entirely.
+(This was briefly moved to `~/.dlp` to mirror the sibling Node.js agent's own `~/.dlp/agent.db`/
+`machine.json` convention, then moved back here for exactly the reason above - no migration
+was needed either time since there were no real deployments yet.)
 
 **The storage directory is an optional constructor parameter, not a hard-coded path.**
 `UsbDeviceList`'s constructor and `DisabledDevices`'s constructor both accept an optional
-`storageDir` (defaulting to `null`, which resolves to the exact `~/.dlp` computation above);
-`DeviceWhitelist`/`DeviceBlacklist` thread the same optional parameter through to their base
-constructor. Every production call site (`Program.cs`) uses the parameterless form and is
-unaffected - this exists purely so `DlpEndpointMonitor.Tests/UsbDeviceListTests.cs` can point
-each test at its own throwaway temp directory instead of touching the real `~/.dlp` (see
-`docs/TEST-PLAN.md` section 2.5.1). Do not add a second, competing way to override the
-directory (e.g. an environment variable) - this constructor parameter is the one seam.
+`storageDir` (defaulting to `null`, which resolves to the exact `%ProgramData%\DlpEndpointMonitor\`
+computation above); `DeviceWhitelist`/`DeviceBlacklist` thread the same optional parameter
+through to their base constructor. Every production call site (`Program.cs`) uses the
+parameterless form and is unaffected - this exists purely so
+`DlpEndpointMonitor.Tests/UsbDeviceListTests.cs` can point each test at its own throwaway temp
+directory instead of touching the real storage location (see `docs/TEST-PLAN.md` section
+2.5.1). Do not add a second, competing way to override the directory (e.g. an environment
+variable) - this constructor parameter is the one seam.
 
 All three share the same pattern (`Core/UsbDeviceList.cs`, `Core/DisabledDevices.cs`):
 - A `ReaderWriterLockSlim` guards in-memory state, because it is read from the STA message
@@ -636,6 +719,20 @@ One class, one job, and the four folders enforce it structurally:
   or `BluetoothActions.GetKindFromCoD` - existing resolution logic is not rewritten.
 - A new command is added by adding a record + enum member + dispatcher `case` + handler
   method - the dispatch loop itself never changes shape.
+
+### DRY (Don't Repeat Yourself)
+- `Core/StorageLocation.cs` holds the single `%ProgramData%\DlpEndpointMonitor` computation
+  used by both `UsbDeviceList` (whitelist/blacklist) and `DisabledDevices` - it used to be
+  copy-pasted identically into both files when `DisabledDevices` was added. That duplication
+  was a real, concrete cost: the storage location has moved twice in this project's history
+  (`%ProgramData%\DlpEndpointMonitor\` -> `~/.dlp` -> back to
+  `%ProgramData%\DlpEndpointMonitor\`, section 6), and each move had to be applied in two
+  places instead of one, with no compiler check to catch a missed spot if they'd drifted.
+  Extracting the shared constant removes that risk for the next move.
+- The general rule: a third occurrence of the same literal value, constant, or block of logic
+  is the signal to extract a shared helper into the correct layer (`Actions/*` for Win32
+  wrappers, `Core/*` for shared state/constants) - not to keep copy-pasting. Two coincidentally
+  similar lines are not yet a violation; three that must change together are.
 
 ### Interface Segregation
 `Handlers/IHandlers.cs` splits into five narrow interfaces (`IClipboardHandler`,
@@ -762,18 +859,69 @@ lines look the way they do, so a future change does not accidentally reintroduce
   whitelist could connect." See section 5.8 for the full fix (`ParsePartialDevice`/
   `ParseMonitorPath` no longer return `null` for these cases) and the `IsProtectedInternal`
   extension (section 5.1) added as its safety net.
+- **[fixed] Disabling/clearing whitelist didn't restore Bluetooth or external displays.**
+  Two unrelated causes: (1) `EnableExternalDisplays` hardcoded `ok = true` regardless of the
+  actual `SetDisplayConfig` result, so a real failure was silently reported as success (see
+  section 5.6); (2) blocking a Bluetooth device unpaired it outright, and Windows has no API
+  to undo an unpair - there was no restore path to have a bug in, by design. Fixed by
+  switching Bluetooth blocking to a reversible device-node disable (section 5.5), with a
+  fallback to the old unpair only when the new MAC-to-instance-ID resolution can't find a
+  matching node, so blocking never silently stops working for an unresolvable device.
+- **[fixed] `UsbActions.GetBluetoothDeviceNode` stopped one level too shallow for BLE
+  devices.** It treated `BTHENUM\` (classic) and `BTHLEDEVICE\` (BLE) as equivalent "the
+  peripheral's own node," but live verification showed `BTHLEDEVICE\` is actually a
+  GATT-service *child* of the true peripheral node, which lives one level up under `BTHLE\`
+  (see section 5.5's verified device tree). Disabling a parent does cascade to disable its
+  children in Windows, so this likely still worked in practice, but landed on the wrong node
+  conceptually. Fixed to walk up to `BTHLE\` for BLE, matching the new `BluetoothMonitor`
+  resolution path exactly.
+- **[fixed] `IsProtectedInternal`'s first-line gate silently skipped `DeviceKind.Network`,
+  so a "block network kind" policy disabled the machine's own built-in WiFi/Ethernet
+  adapter with no protection at all.** Root cause of the real user report ("previously it
+  disable the wifi driver, the network wifi adapter") that the still-open item below was
+  blocked on. `GUID_DEVINTERFACE_NET` is exposed by any NDIS adapter, built-in or USB, so
+  `UsbMonitor`'s generic per-interface/composite-group pipeline (designed for HID-style
+  peripherals, not NIC semantics) reached `BlockDevice` for it - `IsProtectedInternal(kind,
+  instanceId)` gated on `StrictInputKinds.Contains(kind) || kind == DeviceKind.Unknown` as
+  its first line, and `Network` is in neither set, so it returned `false` immediately
+  without ever reaching the bus-ancestry walk. Fixed by (1) extracting that bus-ancestry
+  walk into a new reusable `UsbActions.IsBuiltIn(instanceId)` (Bluetooth-ancestor check
+  first, then USB-ancestor removability, then "no bus ancestor -> internal"), with
+  `IsProtectedInternal` now just gating on kind and delegating to it - behavior for
+  Keyboard/Mouse/Hid/Hub/Unknown is unchanged; and (2) giving `DeviceKind.Network` its own
+  `NetworkMonitor` (section 3, mirrors `BluetoothMonitor`'s shape: no composite-group
+  concept, per-device whitelist/blacklist, own `RestoreCompliant`) whose `BlockDevice` calls
+  `IsBuiltIn` directly, before any `DisableDevice` call, and refuses to block when it
+  returns `true`. `UsbMonitor` now explicitly excludes `Kind == Network` from
+  `OnDeviceChanged`/`EnumerateExisting`/`BlockNonCompliant` so the two monitors partition
+  the same `window.DeviceChanged` event stream purely by resolved kind. New wire events:
+  `network_device_connected/disconnected/blocked/block_failed/unblocked/unblock_failed` -
+  additive, mirrors the `bluetooth_device_*` precedent.
+- **[fixed] `UsbMonitor.RestoreCompliant` had no ownership filter at all, so it raced
+  `BluetoothMonitor.RestoreCompliant` to re-enable the same Bluetooth devnode.** Independently
+  discovered while designing the `Network` fix above (same shared-`DisabledDevices`-list
+  ownership problem): `BluetoothMonitor.RestoreCompliant` already filtered to `d.Mac is not
+  null`, but `UsbMonitor.RestoreCompliant` iterated `_disabled.GetAll()` unfiltered, so a
+  Bluetooth-blocked record (`Mac` set) was processed by both monitors, each independently
+  re-enabling the same devnode and emitting its own unblocked event
+  (`UsbDeviceUnblockedEvent` and `BluetoothDeviceUnblockedEvent`) for one restore action.
+  Fixed by filtering `UsbMonitor.RestoreCompliant`'s foreach to
+  `d.Mac is null && d.Kind != DeviceKind.Network`, so each monitor owns a disjoint slice of
+  the persisted list (plain USB records only), matching `BluetoothMonitor`'s and the new
+  `NetworkMonitor`'s own filters.
 
 ### Not implemented - worth flagging before relying on it
 
 - **No CI** (no `.github/workflows`) - `dotnet build`/`dotnet test` are run by hand (AGENTS.md
   section 8.1).
 - **Automated tests cover only the hardware-independent pure-logic layer.**
-  `DlpEndpointMonitor.Tests/` (xUnit) implements `docs/TEST-PLAN.md` section 2 in full: 75
+  `DlpEndpointMonitor.Tests/` (xUnit) implements `docs/TEST-PLAN.md` section 2 in full: 78
   tests covering `DeviceKindResolver`, the USB/Bluetooth/Display path-parsing functions,
   whitelist/blacklist matching+dedup (via a storage-directory constructor overload on
   `UsbDeviceList`/`DeviceWhitelist`/`DeviceBlacklist`/`DisabledDevices` added specifically to
-  make this safe to test - defaults to the exact prior `~/.dlp` behavior when omitted, so
-  every production call site is unaffected), `CommandDispatcher`, `EventEmitter`, and
+  make this safe to test - defaults to the exact prior `%ProgramData%\DlpEndpointMonitor\`
+  behavior when omitted, so every production call site is unaffected), `CommandDispatcher`,
+  `EventEmitter`, and
   `SchemaExporter`. **Device-blocking and display-topology logic itself is still not
   automated** - `Monitors/*` and `Handlers/Windows/*` call `Actions/*` as static methods with
   no substitution point, so that layer depends on real Win32/hardware/OS state that cannot
@@ -782,6 +930,25 @@ lines look the way they do, so a future change does not accidentally reintroduce
   manual verification on a real machine (`docs/TEST-PLAN.md` section 3's manual matrix: plug/
   unplug the relevant device class, toggle whitelist/blacklist, watch the event stream).
   `docs/TEST-PLAN.md` section 1 has the full feasibility breakdown per file/function.
+- **[resolved as a different bug than originally suspected] Network/WiFi adapter
+  restore/blocking.** Originally filed as a restore-path mystery ("`RestoreCompliant`/
+  `IsRecordCompliant` appear correct by inspection"), but the real root cause was upstream
+  of restore entirely: `IsProtectedInternal` never protected `DeviceKind.Network` in the
+  first place, so the built-in adapter was disabled with no safety net and the *block* side,
+  not the restore side, was the bug - see the bug-history entry above (`IsBuiltIn` +
+  `NetworkMonitor`) for the fix.
+- **Classic Bluetooth (`BTHENUM\`) device-tree assumptions are not live-verified**, unlike
+  BLE (section 5.5) - no classic-paired device was available to test against this session.
+  `BluetoothActions.FindInstanceIdByMac`/`UsbActions.GetBluetoothDeviceNode` both assume
+  `BTHENUM\` is a flat, 2-level hierarchy (peripheral -> HID child) with no intermediate layer
+  analogous to BLE's `BTHLEDEVICE\`. Verify with `Get-PnpDevice | Where-Object { $_.InstanceId
+  -match '^BTHENUM' }` against a real classic-paired device before trusting this path blind.
+- **Display restore may still need a symmetric-reactivation redesign.** The confirmed
+  `EnableExternalDisplays` bug (section 5.6/10) is fixed, but if `SDC_TOPOLOGY_EXTEND` itself
+  turns out not to reliably reactivate a path `DisableExternalDisplays` deliberately dropped
+  from the CCD database, the next step is re-querying and explicitly reactivating the specific
+  external path(s) instead of the blunt auto-topology switch - not implemented, unverifiable
+  without a real external monitor.
 - **No packaging/installer.** There is no MSI/installer project, no service-registration
   script, and no documented uninstall procedure in this repo. Whatever runs this binary
   as a persistent Windows service, and whatever cleans up OS-persistent state on removal
@@ -807,7 +974,8 @@ lines look the way they do, so a future change does not accidentally reintroduce
 | Group compliance for composite USB devices | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
 | The built-in-input safety gate | `Actions/UsbActions.cs` (`IsProtectedInternal`) |
 | Why unclassifiable devices are blocked under whitelist | `Actions/UsbActions.cs` (`ParsePartialDevice`), `Actions/DisplayActions.cs` (`ParseMonitorPath`) |
-| Bluetooth device matching/blocking | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` |
+| Bluetooth device matching/blocking/restore | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`) |
+| Why `BTHLEDEVICE\` is not the Bluetooth peripheral's own node | `Actions/UsbActions.cs` (`GetBluetoothDeviceNode`), `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`), PROJECT.md section 5.5 |
 | Display topology blocking/restore | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
 | GUID/CoD -> DeviceKind resolution | `Core/UsbKind.cs`, `Actions/BluetoothActions.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
