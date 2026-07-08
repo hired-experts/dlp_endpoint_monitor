@@ -72,6 +72,25 @@ public class CommandDispatcherTests
         public void Handle(ShutdownCmd command) => recorder.Record(nameof(ShutdownCmd), command);
     }
 
+    sealed class FakeClipboardProtectionHandler(CallRecorder recorder) : IClipboardProtectionHandler
+    {
+        public void Handle(ClipboardProtectionStatusCmd command) => recorder.Record(nameof(ClipboardProtectionStatusCmd), command);
+        public void Handle(ClipboardWhitelistEnableCmd command) => recorder.Record(nameof(ClipboardWhitelistEnableCmd), command);
+        public void Handle(ClipboardWhitelistDisableCmd command) => recorder.Record(nameof(ClipboardWhitelistDisableCmd), command);
+        public void Handle(ClipboardWhitelistGetCmd command) => recorder.Record(nameof(ClipboardWhitelistGetCmd), command);
+        public void Handle(ClipboardWhitelistClearCmd command) => recorder.Record(nameof(ClipboardWhitelistClearCmd), command);
+        public void Handle(ClipboardWhitelistAddCmd command) => recorder.Record(nameof(ClipboardWhitelistAddCmd), command);
+        public void Handle(ClipboardWhitelistRemoveCmd command) => recorder.Record(nameof(ClipboardWhitelistRemoveCmd), command);
+        public void Handle(ClipboardWhitelistSetCmd command) => recorder.Record(nameof(ClipboardWhitelistSetCmd), command);
+        public void Handle(ClipboardBlacklistEnableCmd command) => recorder.Record(nameof(ClipboardBlacklistEnableCmd), command);
+        public void Handle(ClipboardBlacklistDisableCmd command) => recorder.Record(nameof(ClipboardBlacklistDisableCmd), command);
+        public void Handle(ClipboardBlacklistGetCmd command) => recorder.Record(nameof(ClipboardBlacklistGetCmd), command);
+        public void Handle(ClipboardBlacklistClearCmd command) => recorder.Record(nameof(ClipboardBlacklistClearCmd), command);
+        public void Handle(ClipboardBlacklistAddCmd command) => recorder.Record(nameof(ClipboardBlacklistAddCmd), command);
+        public void Handle(ClipboardBlacklistRemoveCmd command) => recorder.Record(nameof(ClipboardBlacklistRemoveCmd), command);
+        public void Handle(ClipboardBlacklistSetCmd command) => recorder.Record(nameof(ClipboardBlacklistSetCmd), command);
+    }
+
     // Redirects Console.In/Out, drives CommandDispatcher.RunAsync() to completion for one
     // test, and ALWAYS restores the original Console.In/Out — even on assertion failure —
     // since these are process-global (HARNESS rule 3). Cancellation + awaiting the run task
@@ -97,6 +116,7 @@ public class CommandDispatcherTests
                 new FakeUsbStorageHandler(recorder),
                 new FakeUsbDeviceHandler(recorder),
                 new FakeUsbProtectionHandler(recorder),
+                new FakeClipboardProtectionHandler(recorder),
                 new FakeControlHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();
@@ -130,7 +150,8 @@ public class CommandDispatcherTests
     }
 
     // T-CMD-01: a well-formed line for every CommandType dispatches to the correct fake
-    // handler's Handle overload, exactly once each.
+    // handler's Handle overload, exactly once each. Includes the 15 clipboard protection
+    // commands (GAP 1 fix) alongside the pre-existing device protection ones.
     [Fact]
     public async Task Dispatch_OneLinePerCommandType_ReachesCorrectHandlerExactlyOnce()
     {
@@ -144,6 +165,11 @@ public class CommandDispatcherTests
             nameof(DeviceWhitelistClearCmd), nameof(DeviceWhitelistAddCmd), nameof(DeviceWhitelistRemoveCmd), nameof(DeviceWhitelistSetCmd),
             nameof(DeviceBlacklistEnableCmd), nameof(DeviceBlacklistDisableCmd), nameof(DeviceBlacklistGetCmd),
             nameof(DeviceBlacklistClearCmd), nameof(DeviceBlacklistAddCmd), nameof(DeviceBlacklistRemoveCmd), nameof(DeviceBlacklistSetCmd),
+            nameof(ClipboardProtectionStatusCmd),
+            nameof(ClipboardWhitelistEnableCmd), nameof(ClipboardWhitelistDisableCmd), nameof(ClipboardWhitelistGetCmd),
+            nameof(ClipboardWhitelistClearCmd), nameof(ClipboardWhitelistAddCmd), nameof(ClipboardWhitelistRemoveCmd), nameof(ClipboardWhitelistSetCmd),
+            nameof(ClipboardBlacklistEnableCmd), nameof(ClipboardBlacklistDisableCmd), nameof(ClipboardBlacklistGetCmd),
+            nameof(ClipboardBlacklistClearCmd), nameof(ClipboardBlacklistAddCmd), nameof(ClipboardBlacklistRemoveCmd), nameof(ClipboardBlacklistSetCmd),
             nameof(PingCmd), nameof(ShutdownCmd),
         ];
 
@@ -173,8 +199,23 @@ public class CommandDispatcherTests
             """{"id":"22","cmd":"device_blacklist_add","vid":"1234","pid":"5678"}""",
             """{"id":"23","cmd":"device_blacklist_remove","vid":"1234","pid":"5678"}""",
             """{"id":"24","cmd":"device_blacklist_set","entries":[]}""",
-            """{"id":"25","cmd":"ping"}""",
-            """{"id":"26","cmd":"shutdown"}""",
+            """{"id":"25","cmd":"clipboard_protection_status"}""",
+            """{"id":"26","cmd":"clipboard_whitelist_enable"}""",
+            """{"id":"27","cmd":"clipboard_whitelist_disable"}""",
+            """{"id":"28","cmd":"clipboard_whitelist_get"}""",
+            """{"id":"29","cmd":"clipboard_whitelist_clear"}""",
+            """{"id":"30","cmd":"clipboard_whitelist_add","pattern":"secret"}""",
+            """{"id":"31","cmd":"clipboard_whitelist_remove","pattern":"secret"}""",
+            """{"id":"32","cmd":"clipboard_whitelist_set","entries":[]}""",
+            """{"id":"33","cmd":"clipboard_blacklist_enable"}""",
+            """{"id":"34","cmd":"clipboard_blacklist_disable"}""",
+            """{"id":"35","cmd":"clipboard_blacklist_get"}""",
+            """{"id":"36","cmd":"clipboard_blacklist_clear"}""",
+            """{"id":"37","cmd":"clipboard_blacklist_add","pattern":"secret"}""",
+            """{"id":"38","cmd":"clipboard_blacklist_remove","pattern":"secret"}""",
+            """{"id":"39","cmd":"clipboard_blacklist_set","entries":[]}""",
+            """{"id":"40","cmd":"ping"}""",
+            """{"id":"41","cmd":"shutdown"}""",
         ]) + "\n";
 
         var writer = new StringWriter();
@@ -332,6 +373,7 @@ public class CommandDispatcherTests
                 new FakeUsbStorageHandler(new CallRecorder()),
                 new FakeUsbDeviceHandler(new CallRecorder()),
                 new FakeUsbProtectionHandler(new CallRecorder()),
+                new FakeClipboardProtectionHandler(new CallRecorder()),
                 new FakeControlHandler(new CallRecorder()));
 
             Task runTask = dispatcher.RunAsync();
@@ -380,6 +422,7 @@ public class CommandDispatcherTests
                 new FakeUsbStorageHandler(recorder),
                 new FakeUsbDeviceHandler(recorder),
                 new FakeUsbProtectionHandler(recorder),
+                new FakeClipboardProtectionHandler(recorder),
                 new FakeControlHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();

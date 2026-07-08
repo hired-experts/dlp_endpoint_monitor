@@ -10,12 +10,31 @@ namespace DlpEndpointMonitor.Commands;
 // ── Shared ────────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(CommandType))]
 [JsonSerializable(typeof(DeviceKind))]
+[JsonSerializable(typeof(ClipboardKind))]
 [JsonSerializable(typeof(DeviceEntryDto))]
 
 // ── Clipboard ─────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(ClipboardReadCmd))]
 [JsonSerializable(typeof(ClipboardSetCmd))]
 [JsonSerializable(typeof(ClipboardClearCmd))]
+
+// ── Clipboard protection ──────────────────────────────────────────────────────
+[JsonSerializable(typeof(ClipboardRuleDto))]
+[JsonSerializable(typeof(ClipboardProtectionStatusCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistEnableCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistDisableCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistGetCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistClearCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistAddCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistRemoveCmd))]
+[JsonSerializable(typeof(ClipboardWhitelistSetCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistEnableCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistDisableCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistGetCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistClearCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistAddCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistRemoveCmd))]
+[JsonSerializable(typeof(ClipboardBlacklistSetCmd))]
 
 // ── USB — storage ─────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(UsbEjectCmd))]

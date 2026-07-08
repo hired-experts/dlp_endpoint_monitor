@@ -66,7 +66,7 @@ Two projects. `DlpEndpointMonitor/DlpEndpointMonitor.csproj` is the shipped bina
 `net10.0`, built as a trimmed, single-file, self-contained `win-x64` executable (no runtime
 dependency on a shared .NET install), zero NuGet dependencies. `DlpEndpointMonitor.Tests/`
 is a dev-only xUnit test project (the only place a NuGet dependency exists in this repo) -
-see section 8.1 and `docs/TEST-PLAN.md`.
+see section 8.1 and `ai_agent_doc/TEST-PLAN.md`.
 
 ```
 DlpEndpointMonitor/
@@ -81,6 +81,13 @@ DlpEndpointMonitor/
     UsbBlacklist.cs           DeviceBlacklist : UsbDeviceList (IsBlocked)
     DisabledDevices.cs        persisted record of devices THIS process disabled, for restart-safe restore
     UsbKind.cs                DeviceKindResolver: Windows interface-class GUID -> DeviceKind
+    ClipboardRuleList.cs      abstract base: thread-safe, persisted list of regex clipboard rules
+                              (ClipboardRuleEntry(Pattern, Kind?, Label?)); compiles+caches each
+                              entry's Regex (with a timeout) on load/mutate - structurally separate
+                              from UsbDeviceList (different entry shape/matching), same
+                              ReaderWriterLockSlim + atomic-temp-file-write persistence shape
+    ClipboardWhitelist.cs     ClipboardWhitelist : ClipboardRuleList (IsAllowed)
+    ClipboardBlacklist.cs     ClipboardBlacklist : ClipboardRuleList (IsBlocked, FindMatchedPattern)
     MessageWindow.cs          hidden Win32 window + message pump (clipboard/device/display events)
     JsonDiscriminantAttribute.cs   maps an enum value to the JSON field it discriminates on
     EmitsEventAttribute.cs    documents which event a command replies with (used by SchemaExporter)
@@ -94,8 +101,13 @@ DlpEndpointMonitor/
     DisplayMonitor.cs         external monitor arrival, WM_DISPLAYCHANGE debounce, policy enforcement
     NetworkMonitor.cs         NIC arrival/removal, policy enforcement, restore - own monitor (not
                               UsbMonitor's composite pipeline), guarded by UsbActions.IsBuiltIn
-    ClipboardMonitor.cs       WM_CLIPBOARDUPDATE -> reads and emits clipboard content
-    KeyboardHook.cs           low-level keyboard hook: detects Ctrl+C/X/V/Z (reporting only, no blocking)
+    ClipboardMonitor.cs       WM_CLIPBOARDUPDATE -> reads+emits clipboard content, evaluates
+                              Text/Files content against whitelist/blacklist, clears the clipboard
+                              on violation (copy/cut enforcement layer)
+    KeyboardHook.cs           low-level keyboard hook: detects Ctrl+C/X/V/Z (reporting), and on
+                              Ctrl+V live-evaluates current clipboard content and swallows the
+                              keystroke if it violates policy (paste enforcement layer - fails
+                              OPEN on any error, see section 10)
   Actions/                    stateless Win32 P/Invoke helpers, no policy logic
     UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle
     BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing), MAC-to-PnP-node
@@ -104,18 +116,21 @@ DlpEndpointMonitor/
     ClipboardActions.cs       OpenClipboard/GetClipboardData/SetClipboardData
   Handlers/
     IHandlers.cs              one interface per command family (IClipboardHandler, IUsbStorageHandler,
-                              IUsbDeviceHandler, IUsbProtectionHandler, IControlHandler)
-    Windows/                  the concrete Windows implementation of each handler interface
+                              IUsbDeviceHandler, IUsbProtectionHandler, IClipboardProtectionHandler,
+                              IControlHandler)
+    Windows/                  the concrete Windows implementation of each handler interface, incl.
+                              WindowsClipboardProtectionHandler.cs (clipboard whitelist/blacklist
+                              mutations - deliberately does NOT force-disable the other list)
   Win32/
     NativeMethods.cs          every P/Invoke signature and Win32 struct/constant used above
   AppJsonContext.cs           System.Text.Json source-gen context for events + persisted state
 DlpEndpointMonitor.Tests/    xUnit project (ProjectReference to the binary above, InternalsVisibleTo
-                             from AppJsonContext.cs). One test class per docs/TEST-PLAN.md section 2
+                             from AppJsonContext.cs). One test class per ai_agent_doc/TEST-PLAN.md section 2
                              subsection: DeviceKindResolverTests.cs, UsbActionsParsingTests.cs,
                              BluetoothActionsParsingTests.cs, DisplayActionsParsingTests.cs,
                              UsbDeviceListTests.cs, CommandDispatcherTests.cs, EventEmitterTests.cs,
                              SchemaExporterTests.cs. Covers the hardware-independent pure-logic
-                             layer only - see docs/TEST-PLAN.md section 1 for what is and is not
+                             layer only - see ai_agent_doc/TEST-PLAN.md section 1 for what is and is not
                              unit-testable and why.
 ```
 
@@ -240,7 +255,7 @@ dotnet run --project DlpEndpointMonitor -- --schema
 
 There is still no CI (no `.github/workflows`) yet - see PROJECT.md "Not implemented". A test
 project now exists (`DlpEndpointMonitor.Tests/`, xUnit) covering the hardware-independent
-pure-logic layer only - `docs/TEST-PLAN.md` section 1 has the full feasibility breakdown of
+pure-logic layer only - `ai_agent_doc/TEST-PLAN.md` section 1 has the full feasibility breakdown of
 what is and is not covered and why.
 
 ### 8.1 Validation gate (run before every commit)
@@ -249,7 +264,7 @@ what is and is not covered and why.
    reference warnings and analyzer warnings are worth reading even though nothing currently
    fails the build on them.
 2. `dotnet test DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj` - must report 0
-   failures. Covers `docs/TEST-PLAN.md` section 2 (device-kind resolution, USB/Bluetooth/
+   failures. Covers `ai_agent_doc/TEST-PLAN.md` section 2 (device-kind resolution, USB/Bluetooth/
    Display path parsing, whitelist/blacklist matching+dedup, command dispatch, event
    emission, schema export) - if you touched any of those files, this is a real automated
    check, not just a manual one.
@@ -259,7 +274,7 @@ what is and is not covered and why.
 4. Manually exercise the change if it touches device blocking or display topology
    (`Monitors/*`, `Handlers/Windows/*`, or the Win32-calling methods of `Actions/*`) - these
    paths still cannot be meaningfully unit-tested without real hardware/OS state (see
-   `docs/TEST-PLAN.md` section 1's feasibility table and section 3's manual test matrix), so
+   `ai_agent_doc/TEST-PLAN.md` section 1's feasibility table and section 3's manual test matrix), so
    a manual pass (plug/unplug the relevant device class, or toggle whitelist/blacklist and
    confirm the event stream) is the actual test for that part today.
 
@@ -447,6 +462,22 @@ what is and is not covered and why.
   for a real shipped bug: `IsProtectedInternal`'s first-line gate did not cover `Network`, so a
   "block network kind" policy disabled the machine's own built-in WiFi/Ethernet adapter with no
   protection at all (see PROJECT.md section 5.9 and bug history).
+- **Clipboard content policy is intentionally different from device policy - do not "fix" it to
+  match.** `ClipboardWhitelist`/`ClipboardBlacklist` can both be enabled at once; this is a valid,
+  intended state, not a `conflict` - there is no `ProtectionMode`/mode concept and no startup
+  conflict-guard for clipboard, unlike `DeviceWhitelistEnableCmd`/`DeviceBlacklistEnableCmd`
+  (which force-disable the other list), `ClipboardWhitelistEnableCmd`/`ClipboardBlacklistEnableCmd`
+  (`WindowsClipboardProtectionHandler`) deliberately do NOT touch the other list's `Enabled` flag.
+  Enforcement is the same AND-formula every device monitor already uses (`whitelist.IsAllowed(...)
+  && !blacklist.IsBlocked(...)`), just applied to clipboard Text/Files content instead of a device
+  identity - see PROJECT.md section 5.10. Separately, and just as important: `KeyboardHook`'s
+  paste-interception path (`ShouldBlockPaste`) deliberately **fails OPEN, not closed**, on any
+  error - it is a global, system-wide `WH_KEYBOARD_LL` hook, so an uncaught exception there would
+  silently break paste for every application on the machine until the process restarts, which is
+  worse than occasionally letting through content that should have been blocked. This is the
+  opposite of `IsProtectedInternal`/`IsRemovable`'s fail-**closed** defaults in device blocking
+  (section 10's other entries, PROJECT.md section 5.1) - do not port that fail-closed instinct
+  onto the paste path, or a bad regex from an operator can brick paste system-wide.
 
 ---
 
@@ -470,4 +501,4 @@ what is and is not covered and why.
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | Deep design, protocol tables, principles, roadmap | `ai_agent_doc/PROJECT.md` |
 | The validation gate to run before a commit | AGENTS.md section 8.1 |
-| What's unit-testable today vs. hardware-only, and the full test case list | `docs/TEST-PLAN.md` |
+| What's unit-testable today vs. hardware-only, and the full test case list | `ai_agent_doc/TEST-PLAN.md` |

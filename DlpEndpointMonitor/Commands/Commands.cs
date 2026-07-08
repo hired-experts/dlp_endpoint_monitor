@@ -20,6 +20,58 @@ record ClipboardSetCmd(string? Id, string Content) : ICommand;
 [JsonDiscriminant(CommandType.ClipboardClear)]
 record ClipboardClearCmd(string? Id) : ICommand;
 
+// ── Clipboard protection ──────────────────────────────────────────────────────
+
+record ClipboardRuleDto(string Pattern, ClipboardKind? Kind, string? Label);
+
+[JsonDiscriminant(CommandType.ClipboardProtectionStatus)]
+[EmitsEvent(EventType.ClipboardProtectionStatus)]
+record ClipboardProtectionStatusCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistEnable)]
+record ClipboardWhitelistEnableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistDisable)]
+record ClipboardWhitelistDisableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistGet)]
+[EmitsEvent(EventType.ClipboardWhitelistGet)]
+record ClipboardWhitelistGetCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistClear)]
+record ClipboardWhitelistClearCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistAdd)]
+record ClipboardWhitelistAddCmd(string? Id, string Pattern, ClipboardKind? Kind = null, string? Label = null) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistRemove)]
+record ClipboardWhitelistRemoveCmd(string? Id, string Pattern, ClipboardKind? Kind = null) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardWhitelistSet)]
+record ClipboardWhitelistSetCmd(string? Id, ClipboardRuleDto[] Entries) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistEnable)]
+record ClipboardBlacklistEnableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistDisable)]
+record ClipboardBlacklistDisableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistGet)]
+[EmitsEvent(EventType.ClipboardBlacklistGet)]
+record ClipboardBlacklistGetCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistClear)]
+record ClipboardBlacklistClearCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistAdd)]
+record ClipboardBlacklistAddCmd(string? Id, string Pattern, ClipboardKind? Kind = null, string? Label = null) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistRemove)]
+record ClipboardBlacklistRemoveCmd(string? Id, string Pattern, ClipboardKind? Kind = null) : ICommand;
+
+[JsonDiscriminant(CommandType.ClipboardBlacklistSet)]
+record ClipboardBlacklistSetCmd(string? Id, ClipboardRuleDto[] Entries) : ICommand;
+
 // ── USB — storage ─────────────────────────────────────────────────────────────
 
 [JsonDiscriminant(CommandType.UsbEject)]

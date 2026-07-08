@@ -7,27 +7,30 @@ namespace DlpEndpointMonitor.Core;
 
 sealed class CommandDispatcher
 {
-    readonly CancellationToken     _cancellationToken;
-    readonly IClipboardHandler     _clipboard;
-    readonly IUsbStorageHandler    _usbStorage;
-    readonly IUsbDeviceHandler     _usbDevice;
-    readonly IUsbProtectionHandler _usbProtection;
-    readonly IControlHandler       _control;
+    readonly CancellationToken           _cancellationToken;
+    readonly IClipboardHandler           _clipboard;
+    readonly IUsbStorageHandler          _usbStorage;
+    readonly IUsbDeviceHandler           _usbDevice;
+    readonly IUsbProtectionHandler       _usbProtection;
+    readonly IClipboardProtectionHandler _clipboardProtection;
+    readonly IControlHandler             _control;
 
     public CommandDispatcher(
-        CancellationToken     cancellationToken,
-        IClipboardHandler     clipboard,
-        IUsbStorageHandler    usbStorage,
-        IUsbDeviceHandler     usbDevice,
-        IUsbProtectionHandler usbProtection,
-        IControlHandler       control)
+        CancellationToken           cancellationToken,
+        IClipboardHandler           clipboard,
+        IUsbStorageHandler          usbStorage,
+        IUsbDeviceHandler           usbDevice,
+        IUsbProtectionHandler       usbProtection,
+        IClipboardProtectionHandler clipboardProtection,
+        IControlHandler             control)
     {
-        _cancellationToken = cancellationToken;
-        _clipboard         = clipboard;
-        _usbStorage        = usbStorage;
-        _usbDevice         = usbDevice;
-        _usbProtection     = usbProtection;
-        _control           = control;
+        _cancellationToken   = cancellationToken;
+        _clipboard           = clipboard;
+        _usbStorage          = usbStorage;
+        _usbDevice           = usbDevice;
+        _usbProtection       = usbProtection;
+        _clipboardProtection = clipboardProtection;
+        _control             = control;
     }
 
     public async Task RunAsync()
@@ -80,6 +83,23 @@ sealed class CommandDispatcher
                 case CommandType.ClipboardRead:  _clipboard.Handle(Deserialize<ClipboardReadCmd>(rawJson));  break;
                 case CommandType.ClipboardSet:   _clipboard.Handle(Deserialize<ClipboardSetCmd>(rawJson));   break;
                 case CommandType.ClipboardClear: _clipboard.Handle(Deserialize<ClipboardClearCmd>(rawJson)); break;
+
+                // ── Clipboard protection ──────────────────────────────────────
+                case CommandType.ClipboardProtectionStatus: _clipboardProtection.Handle(Deserialize<ClipboardProtectionStatusCmd>(rawJson)); break;
+                case CommandType.ClipboardWhitelistEnable:  _clipboardProtection.Handle(Deserialize<ClipboardWhitelistEnableCmd>(rawJson));  break;
+                case CommandType.ClipboardWhitelistDisable: _clipboardProtection.Handle(Deserialize<ClipboardWhitelistDisableCmd>(rawJson)); break;
+                case CommandType.ClipboardWhitelistGet:     _clipboardProtection.Handle(Deserialize<ClipboardWhitelistGetCmd>(rawJson));     break;
+                case CommandType.ClipboardWhitelistClear:   _clipboardProtection.Handle(Deserialize<ClipboardWhitelistClearCmd>(rawJson));   break;
+                case CommandType.ClipboardWhitelistAdd:     _clipboardProtection.Handle(Deserialize<ClipboardWhitelistAddCmd>(rawJson));     break;
+                case CommandType.ClipboardWhitelistRemove:  _clipboardProtection.Handle(Deserialize<ClipboardWhitelistRemoveCmd>(rawJson));  break;
+                case CommandType.ClipboardWhitelistSet:     _clipboardProtection.Handle(Deserialize<ClipboardWhitelistSetCmd>(rawJson));     break;
+                case CommandType.ClipboardBlacklistEnable:  _clipboardProtection.Handle(Deserialize<ClipboardBlacklistEnableCmd>(rawJson));  break;
+                case CommandType.ClipboardBlacklistDisable: _clipboardProtection.Handle(Deserialize<ClipboardBlacklistDisableCmd>(rawJson)); break;
+                case CommandType.ClipboardBlacklistGet:     _clipboardProtection.Handle(Deserialize<ClipboardBlacklistGetCmd>(rawJson));     break;
+                case CommandType.ClipboardBlacklistClear:   _clipboardProtection.Handle(Deserialize<ClipboardBlacklistClearCmd>(rawJson));   break;
+                case CommandType.ClipboardBlacklistAdd:     _clipboardProtection.Handle(Deserialize<ClipboardBlacklistAddCmd>(rawJson));     break;
+                case CommandType.ClipboardBlacklistRemove:  _clipboardProtection.Handle(Deserialize<ClipboardBlacklistRemoveCmd>(rawJson));  break;
+                case CommandType.ClipboardBlacklistSet:     _clipboardProtection.Handle(Deserialize<ClipboardBlacklistSetCmd>(rawJson));     break;
 
                 // ── USB — storage ─────────────────────────────────────────────
                 case CommandType.UsbEject:          _usbStorage.Handle(Deserialize<UsbEjectCmd>(rawJson));          break;

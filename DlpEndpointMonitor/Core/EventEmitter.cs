@@ -84,6 +84,44 @@ public record ClipboardImageEvent(long Ts)
 [JsonDiscriminant(ClipboardKind.Unknown)]
 public record ClipboardUnknownEvent(long Ts)
     : ClipboardChangeEvent("copy", ClipboardKind.Unknown, Ts);
+
+// Deliberately no ProtectionMode/Conflict field here, unlike DeviceProtectionStatusEvent -
+// both clipboard lists being enabled at once is a valid state, not a conflict to guard against.
+[JsonDiscriminant(EventType.ClipboardProtectionStatus)]
+public record ClipboardProtectionStatusEvent(string? Id, bool Ok, bool WhitelistEnabled, bool BlacklistEnabled) : IEvent
+{
+    public EventType Type => EventType.ClipboardProtectionStatus;
+}
+
+public record ClipboardRuleEntryDto(string Pattern, ClipboardKind? Kind, string? Label);
+
+[JsonDiscriminant(EventType.ClipboardWhitelistGet)]
+public record ClipboardWhitelistGetEvent(string? Id, bool Ok, bool Enabled, IEnumerable<ClipboardRuleEntryDto> Entries) : IEvent
+{
+    public EventType Type => EventType.ClipboardWhitelistGet;
+}
+
+[JsonDiscriminant(EventType.ClipboardBlacklistGet)]
+public record ClipboardBlacklistGetEvent(string? Id, bool Ok, bool Enabled, IEnumerable<ClipboardRuleEntryDto> Entries) : IEvent
+{
+    public EventType Type => EventType.ClipboardBlacklistGet;
+}
+
+// Reason is "blacklist_match" (MatchedPattern set to the specific pattern that matched) or
+// "whitelist_gate" (whitelist enabled, nothing matched it — MatchedPattern null, since there is
+// no single pattern responsible for an absence of a match).
+[JsonDiscriminant(EventType.ClipboardContentBlocked)]
+public record ClipboardContentBlockedEvent(string Operation, ClipboardKind Kind, string Reason, string? MatchedPattern, long Ts) : IEvent
+{
+    public EventType Type => EventType.ClipboardContentBlocked;
+}
+
+// Emitted when the remediation action itself fails (e.g. ClipboardActions.Clear() returns false).
+[JsonDiscriminant(EventType.ClipboardContentBlockFailed)]
+public record ClipboardContentBlockFailedEvent(string Operation, ClipboardKind Kind, string? Error, long Ts) : IEvent
+{
+    public EventType Type => EventType.ClipboardContentBlockFailed;
+}
 #endregion
 
 #region USB

@@ -86,9 +86,10 @@ public class SchemaExporterTests
     }
 
     // T-SCHEMA-04: cmdReply contains an entry for every command carrying [EmitsEvent],
-    // and no others. List read directly from Commands/Commands.cs (5 commands as of
-    // this fix): ClipboardReadCmd, UsbStorageStatusCmd, DeviceProtectionStatusCmd,
-    // DeviceWhitelistGetCmd, DeviceBlacklistGetCmd.
+    // and no others. List read directly from Commands/Commands.cs: ClipboardReadCmd,
+    // UsbStorageStatusCmd, DeviceProtectionStatusCmd, DeviceWhitelistGetCmd, DeviceBlacklistGetCmd,
+    // plus (added alongside clipboard protection) ClipboardProtectionStatusCmd,
+    // ClipboardWhitelistGetCmd, ClipboardBlacklistGetCmd.
     [Fact]
     public void Export_CmdReply_MatchesEmitsEventAttributeUsageExactly()
     {
@@ -104,6 +105,9 @@ public class SchemaExporterTests
             WireName(CommandType.DeviceProtectionStatus),
             WireName(CommandType.DeviceWhitelistGet),
             WireName(CommandType.DeviceBlacklistGet),
+            WireName(CommandType.ClipboardProtectionStatus),
+            WireName(CommandType.ClipboardWhitelistGet),
+            WireName(CommandType.ClipboardBlacklistGet),
         };
 
         Assert.Equal(expectedKeys, actualKeys);
@@ -114,6 +118,9 @@ public class SchemaExporterTests
         Assert.Equal(WireName(EventType.DeviceProtectionStatus), cmdReply.GetProperty(WireName(CommandType.DeviceProtectionStatus)).GetString());
         Assert.Equal(WireName(EventType.DeviceWhitelistGet), cmdReply.GetProperty(WireName(CommandType.DeviceWhitelistGet)).GetString());
         Assert.Equal(WireName(EventType.DeviceBlacklistGet), cmdReply.GetProperty(WireName(CommandType.DeviceBlacklistGet)).GetString());
+        Assert.Equal(WireName(EventType.ClipboardProtectionStatus), cmdReply.GetProperty(WireName(CommandType.ClipboardProtectionStatus)).GetString());
+        Assert.Equal(WireName(EventType.ClipboardWhitelistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardWhitelistGet)).GetString());
+        Assert.Equal(WireName(EventType.ClipboardBlacklistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardBlacklistGet)).GetString());
     }
 
     // T-SCHEMA-04 (regression half): confirm every command WITHOUT [EmitsEvent] really
@@ -130,7 +137,7 @@ public class SchemaExporterTests
             .Where(t => typeof(ICommand).IsAssignableFrom(t) && t.IsClass && !t.IsAbstract)
             .Where(t => t.GetCustomAttribute<EmitsEventAttribute>() is null)
             .Select(t => t.GetCustomAttribute<JsonDiscriminantAttribute>()?.Value)
-            .Where(v => v is not null);
+            .OfType<string>();
 
         foreach (var wireName in commandsWithoutEmitsEvent)
             Assert.DoesNotContain(wireName, actualKeys);

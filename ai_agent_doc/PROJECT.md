@@ -621,6 +621,99 @@ owns every `Kind == Network` device exclusively, structurally mirroring `Bluetoo
   `network_device_connected`, `network_device_disconnected`, `network_device_blocked`,
   `network_device_block_failed`, `network_device_unblocked`, `network_device_unblock_failed`.
 
+### 5.10 Clipboard content policy (separate from device blocking - `ClipboardMonitor`, `KeyboardHook`)
+
+Clipboard content policy is a structurally separate feature from everything else in this
+section - it does not decide whether to disable/eject a *device*, it decides whether to let
+copied/cut/pasted *content* through, and its persistence, combination, and enforcement rules are
+all deliberately different from 4.1-4.4/5.1-5.9 above. Read this subsection before touching
+`Core/ClipboardRuleList.cs`, `Monitors/ClipboardMonitor.cs`, or `Monitors/KeyboardHook.cs`.
+
+**Persisted lists.** `ClipboardWhitelist`/`ClipboardBlacklist` (`Core/ClipboardRuleList.cs`) mirror
+`UsbDeviceList`'s `ReaderWriterLockSlim` + atomic-temp-file-write persistence shape (same
+`StorageLocation.Default`, i.e. `%ProgramData%\DlpEndpointMonitor\`, as `clipboard-whitelist.json`/
+`clipboard-blacklist.json`), but hold a structurally different entry,
+`ClipboardRuleEntry(Pattern, Kind?, Label?)` - a regex pattern optionally scoped to a
+`ClipboardKind`, not a device identity - and match by `Regex.IsMatch`, not vid/pid/mac
+wildcarding. Two entries are the same rule when `Pattern` (ordinal - regex patterns are literal
+strings, not case-insensitive text) and `Kind` both match (`SameRule`, the `ClipboardRuleEntry`
+analogue of `UsbDeviceList.SameDevice`); `Label` is cosmetic and ignored for identity, same as
+`UsbDeviceEntry.Label`. Every entry's `Regex` is compiled exactly once, whenever the list loads
+or mutates (`RebuildCompiled`, which publishes a brand-new immutable list so a reader taking the
+read lock never sees a partially-rebuilt cache) - never re-parsed on the hot path, because that
+hot path includes the keyboard hook's per-keystroke Ctrl+V check. Every `Regex` is constructed
+with an explicit 250ms timeout; a `RegexMatchTimeoutException` is caught and treated as "did not
+match" (logged via `EventEmitter.EmitError`), and a pattern that fails to even *construct*
+(`ArgumentException`, e.g. an unbalanced group) is kept in the list - still reported by
+`Get`/`GetAll` - paired with a `null` compiled `Regex`, so it degrades to permanently inert rather
+than crashing `Add`/`Load` or losing the rest of the list. This all exists because an
+operator-supplied catastrophic-backtracking pattern is evaluated synchronously inside a global
+low-level keyboard hook - without the timeout, one bad pattern could stall every keystroke on the
+machine.
+
+**The AND-combination formula, and why both lists enabled at once is fine.**
+`ClipboardMonitor.EvaluatePolicy` (internal, not private, specifically so `KeyboardHook` reuses it
+instead of carrying a second, possibly-diverging copy) computes: `allowed = (whitelist disabled OR
+ANY candidate matches a whitelist pattern) AND (blacklist disabled OR NO candidate matches a
+blacklist pattern)` - the exact same formula every device monitor already applies
+(`whitelist.IsAllowed(...) && !blacklist.IsBlocked(...)`). The divergence from device policy is in
+what's allowed to *reach* that formula: `WindowsUsbProtectionHandler` force-disables the other
+list on every `*WhitelistEnableCmd`/`*BlacklistEnableCmd` (4.1), making simultaneous enablement an
+unreachable `conflict` state guarded at startup. `WindowsClipboardProtectionHandler.Handle
+(ClipboardWhitelistEnableCmd)`/`Handle(ClipboardBlacklistEnableCmd)` deliberately do **not** touch
+the other list's `Enabled` flag - both enabled at once is a valid, intended combination (the
+whitelist gates what's allowed through at all; the blacklist additionally forbids specific
+patterns even within whatever the whitelist allows), not a conflict. There is no
+`ProtectionMode`-equivalent concept and no startup conflict-guard for clipboard - do not add one.
+
+**Two-layer enforcement.**
+1. **Copy/cut** - `ClipboardMonitor.OnClipboardChanged` evaluates new content the instant
+   `WM_CLIPBOARDUPDATE` fires (via `EvaluateAndEnforce`); a violation calls
+   `ClipboardActions.Clear()` (the existing `EmptyClipboard()` wrapper, unchanged) and emits
+   `ClipboardContentBlockedEvent` (`Reason: "blacklist_match"` with the specific `MatchedPattern`,
+   or `"whitelist_gate"` with `MatchedPattern: null` when the whitelist is enabled and nothing
+   satisfied it) - or `ClipboardContentBlockFailedEvent` if `Clear()` itself fails. The existing
+   `clipboard_change` event (`ClipboardTextEvent`/`ClipboardFilesEvent`/`ClipboardImageEvent`/
+   `ClipboardUnknownEvent`) is still emitted first, regardless of verdict, exactly as before this
+   feature - "what was copied/cut" is always reported. A public `ApplyPolicy()` re-reads and
+   re-evaluates whatever is CURRENTLY on the clipboard; `WindowsClipboardProtectionHandler` calls
+   it (via `Task.Run`) after every whitelist/blacklist mutation, because clipboard content has no
+   persisted "this was blocked" record the way a device does (every clipboard read is live and
+   transient) - a newly-tightened policy must clear already-present non-compliant content
+   immediately, not wait for the next copy.
+2. **Paste** - `KeyboardHook`'s existing Ctrl+V keydown detection now also live-evaluates
+   whatever is CURRENTLY on the clipboard, in the hook callback, before the keystroke reaches any
+   application (`ShouldBlockPaste`). A violation returns a non-zero value **without** calling
+   `CallNextHookEx`, so the keystroke never reaches any application; the existing
+   `KeyboardShortcutEvent("paste", ...)` reporting emission is unchanged and still fires
+   regardless of verdict. This closes the race window where a very fast paste immediately after a
+   copy could beat the copy-time clearing in layer 1.
+
+**The paste layer fails OPEN, not closed - the opposite default from device blocking.**
+`KeyboardHook`'s hook procedure is a global, system-wide `WH_KEYBOARD_LL` hook (unlike a
+per-device enforcement decision). `ShouldBlockPaste`'s entire body is wrapped in try/catch; on
+ANY exception (malformed regex, a Win32 clipboard-read failure, anything) it returns `false` (do
+not block), falling through to the ordinary `CallNextHookEx` call. A bug that swallows Ctrl+V
+without meaning to breaks paste for every application on the machine, silently, until the process
+restarts - a far worse failure mode than occasionally letting through content that should have
+been blocked. This is the exact opposite of `IsProtectedInternal`/`IsRemovable`'s fail-**safe**
+(fail-closed) defaults in section 5.1 - an undeterminable device is protected there, but
+undeterminable clipboard content is let through here. Know which direction applies before
+reusing either pattern elsewhere.
+
+**Content-scope limitation.** Only `ClipboardKind.Text` (the full copied/pasted string) and
+`ClipboardKind.Files` (each file's full path individually) are ever evaluated against these
+rules. For Files, aggregation mirrors `UsbMonitor.IsGroupCompliant`'s "any sibling matches"
+`.Any()` style exactly: ANY single path matching a blacklist pattern blocks the whole clipboard
+operation; ANY single path matching a whitelist pattern satisfies the whitelist gate for the
+whole operation. `ClipboardKind.Image` and `Unknown` clipboard content have no text to test and
+always pass through untouched regardless of policy state - this is a deliberate scope limit
+(no OCR, no file-content scanning), not a gap this feature is meant to close.
+
+**What this does NOT cover.** Only a Ctrl+V keydown is interceptable this way. Right-click
+"Paste", Shift+Insert, and an application's own Paste button/API all bypass the low-level
+keyboard hook entirely and are not blocked by this feature - see the bug-history entry below.
+
 ---
 
 ## 6. Persistence
@@ -642,7 +735,7 @@ computation above); `DeviceWhitelist`/`DeviceBlacklist` thread the same optional
 through to their base constructor. Every production call site (`Program.cs`) uses the
 parameterless form and is unaffected - this exists purely so
 `DlpEndpointMonitor.Tests/UsbDeviceListTests.cs` can point each test at its own throwaway temp
-directory instead of touching the real storage location (see `docs/TEST-PLAN.md` section
+directory instead of touching the real storage location (see `ai_agent_doc/TEST-PLAN.md` section
 2.5.1). Do not add a second, competing way to override the directory (e.g. an environment
 variable) - this constructor parameter is the one seam.
 
@@ -735,14 +828,18 @@ One class, one job, and the four folders enforce it structurally:
   similar lines are not yet a violation; three that must change together are.
 
 ### Interface Segregation
-`Handlers/IHandlers.cs` splits into five narrow interfaces (`IClipboardHandler`,
-`IUsbStorageHandler`, `IUsbDeviceHandler`, `IUsbProtectionHandler`, `IControlHandler`)
-rather than one god-interface. The one exception is deliberate: whitelist and blacklist
-share `IUsbProtectionHandler` because their mutual-exclusivity logic (enabling one disables
-the other) genuinely needs both lists in the same place.
+`Handlers/IHandlers.cs` splits into six narrow interfaces (`IClipboardHandler`,
+`IUsbStorageHandler`, `IUsbDeviceHandler`, `IUsbProtectionHandler`,
+`IClipboardProtectionHandler`, `IControlHandler`) rather than one god-interface. Two
+exceptions are deliberate, for opposite reasons: whitelist and blacklist share
+`IUsbProtectionHandler` because their mutual-exclusivity logic (enabling one disables the
+other) genuinely needs both lists in the same place; clipboard whitelist/blacklist share
+`IClipboardProtectionHandler` for the mirror-image reason - they do NOT have mutual-exclusivity
+logic (both can be enabled at once, section 5.10), but they do share one `reevaluate` delegate,
+so keeping them together avoids two near-identical interfaces.
 
 ### Dependency Inversion
-`CommandDispatcher` depends on the five handler *interfaces*, not the concrete
+`CommandDispatcher` depends on the six handler *interfaces*, not the concrete
 `Handlers.Windows.*` classes - `Program.cs` is the one place concrete types are
 constructed and injected. If this binary ever targets a non-Windows platform, only
 `Handlers/Windows/*` and `Actions/*`/`Win32/*` would need replacing.
@@ -909,27 +1006,43 @@ lines look the way they do, so a future change does not accidentally reintroduce
   `d.Mac is null && d.Kind != DeviceKind.Network`, so each monitor owns a disjoint slice of
   the persisted list (plain USB records only), matching `BluetoothMonitor`'s and the new
   `NetworkMonitor`'s own filters.
+- **[added] Clipboard content policy: regex whitelist/blacklist rules over copy/cut/paste,
+  enforced at two independent layers.** New capability, not a bug fix - see section 5.10 for the
+  full model. New persisted lists (`ClipboardWhitelist`/`ClipboardBlacklist`,
+  `Core/ClipboardRuleList.cs`), commands/events (`clipboard_whitelist_*`/`clipboard_blacklist_*`/
+  `clipboard_protection_status`, `ClipboardContentBlockedEvent`/`ClipboardContentBlockFailedEvent`),
+  and `WindowsClipboardProtectionHandler`. Two deliberate divergences from every existing device
+  policy in this doc: (1) both lists can be enabled simultaneously - no `ProtectionMode`/conflict
+  concept, no startup conflict-guard, for clipboard; (2) the paste-interception path
+  (`KeyboardHook.ShouldBlockPaste`) fails OPEN, not closed, on any internal error, since it is a
+  global `WH_KEYBOARD_LL` hook and swallowing a keystroke by accident breaks paste for every
+  application on the machine, not just this feature's target content. **Explicitly does NOT
+  cover**: right-click "Paste", Shift+Insert, and an application's own Paste button/API all bypass
+  the low-level keyboard hook entirely and are not interceptable this way - only a Ctrl+V keydown
+  is. Also out of scope: Image and Unknown clipboard content (no text to evaluate a regex
+  against) always pass through untouched regardless of policy.
 
 ### Not implemented - worth flagging before relying on it
 
 - **No CI** (no `.github/workflows`) - `dotnet build`/`dotnet test` are run by hand (AGENTS.md
   section 8.1).
 - **Automated tests cover only the hardware-independent pure-logic layer.**
-  `DlpEndpointMonitor.Tests/` (xUnit) implements `docs/TEST-PLAN.md` section 2 in full: 78
+  `DlpEndpointMonitor.Tests/` (xUnit) implements `ai_agent_doc/TEST-PLAN.md` section 2 in full: 104
   tests covering `DeviceKindResolver`, the USB/Bluetooth/Display path-parsing functions,
   whitelist/blacklist matching+dedup (via a storage-directory constructor overload on
   `UsbDeviceList`/`DeviceWhitelist`/`DeviceBlacklist`/`DisabledDevices` added specifically to
   make this safe to test - defaults to the exact prior `%ProgramData%\DlpEndpointMonitor\`
-  behavior when omitted, so every production call site is unaffected), `CommandDispatcher`,
-  `EventEmitter`, and
+  behavior when omitted, so every production call site is unaffected), clipboard
+  whitelist/blacklist matching+dedup+AND-combination (`ClipboardRuleListTests.cs`, same
+  storage-directory-seam pattern), `CommandDispatcher`, `EventEmitter`, and
   `SchemaExporter`. **Device-blocking and display-topology logic itself is still not
   automated** - `Monitors/*` and `Handlers/Windows/*` call `Actions/*` as static methods with
   no substitution point, so that layer depends on real Win32/hardware/OS state that cannot
-  be faked without introducing a seam (`docs/TEST-PLAN.md` section 4 sketches what that would
+  be faked without introducing a seam (`ai_agent_doc/TEST-PLAN.md` section 4 sketches what that would
   look like, not implemented). Today's "test" for that part is a careful code read plus
-  manual verification on a real machine (`docs/TEST-PLAN.md` section 3's manual matrix: plug/
+  manual verification on a real machine (`ai_agent_doc/TEST-PLAN.md` section 3's manual matrix: plug/
   unplug the relevant device class, toggle whitelist/blacklist, watch the event stream).
-  `docs/TEST-PLAN.md` section 1 has the full feasibility breakdown per file/function.
+  `ai_agent_doc/TEST-PLAN.md` section 1 has the full feasibility breakdown per file/function.
 - **[resolved as a different bug than originally suspected] Network/WiFi adapter
   restore/blocking.** Originally filed as a restore-path mystery ("`RestoreCompliant`/
   `IsRecordCompliant` appear correct by inspection"), but the real root cause was upstream

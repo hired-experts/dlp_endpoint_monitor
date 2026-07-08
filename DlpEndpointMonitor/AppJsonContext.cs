@@ -11,6 +11,7 @@ using System.Text.Json.Serialization;
 // ── Persistence ───────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(UsbDeviceListState))]
 [JsonSerializable(typeof(DisabledDevicesState))]
+[JsonSerializable(typeof(ClipboardRuleListState))]
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(EventType))]
@@ -29,6 +30,12 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(ClipboardFilesEvent))]
 [JsonSerializable(typeof(ClipboardImageEvent))]
 [JsonSerializable(typeof(ClipboardUnknownEvent))]
+[JsonSerializable(typeof(ClipboardProtectionStatusEvent))]
+[JsonSerializable(typeof(ClipboardRuleEntryDto[]))]
+[JsonSerializable(typeof(ClipboardWhitelistGetEvent))]
+[JsonSerializable(typeof(ClipboardBlacklistGetEvent))]
+[JsonSerializable(typeof(ClipboardContentBlockedEvent))]
+[JsonSerializable(typeof(ClipboardContentBlockFailedEvent))]
 
 // ── USB ───────────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(UsbDriveConnectedEvent))]

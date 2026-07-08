@@ -4,7 +4,7 @@ using Xunit;
 
 namespace DlpEndpointMonitor.Tests;
 
-// docs/TEST-PLAN.md section 2.2 — pure regex/string parsing over a caller-supplied path,
+// ai_agent_doc/TEST-PLAN.md section 2.2 — pure regex/string parsing over a caller-supplied path,
 // no Win32/hardware involved. UsbActions is an internal static class; its members are
 // public, reachable here via [assembly: InternalsVisibleTo("DlpEndpointMonitor.Tests")].
 public class UsbActionsParsingTests

@@ -4,7 +4,7 @@ using Xunit;
 namespace DlpEndpointMonitor.Tests;
 
 /// <summary>
-/// docs/TEST-PLAN.md section 2.5 (T-LIST-01..15): DeviceWhitelist/DeviceBlacklist matching
+/// ai_agent_doc/TEST-PLAN.md section 2.5 (T-LIST-01..15): DeviceWhitelist/DeviceBlacklist matching
 /// and dedup, via the storage-dir constructor seam so every test uses its own throwaway
 /// directory instead of the real %ProgramData%\DlpEndpointMonitor\.
 /// </summary>

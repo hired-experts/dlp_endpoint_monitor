@@ -4,7 +4,7 @@ using Xunit;
 
 namespace DlpEndpointMonitor.Tests;
 
-// docs/TEST-PLAN.md section 2.4 - DisplayActions.ParseMonitorPath (Actions/DisplayActions.cs)
+// ai_agent_doc/TEST-PLAN.md section 2.4 - DisplayActions.ParseMonitorPath (Actions/DisplayActions.cs)
 public class DisplayActionsParsingTests
 {
     const string GuidSuffix = "#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";

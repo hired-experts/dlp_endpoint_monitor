@@ -4,7 +4,7 @@ using Xunit;
 
 namespace DlpEndpointMonitor.Tests;
 
-// docs/TEST-PLAN.md section 2.3 - Actions/BluetoothActions.cs pure parsing/decoding logic.
+// ai_agent_doc/TEST-PLAN.md section 2.3 - Actions/BluetoothActions.cs pure parsing/decoding logic.
 public class BluetoothActionsParsingTests
 {
     // T-BT-01: well-formed BTHENUM path yields canonical colon-separated uppercase MAC.
@@ -76,7 +76,7 @@ public class BluetoothActionsParsingTests
     // T-BT-03 (ADAPTED): the plan describes a FormatAddress/ParseMacToUllLong round trip, but
     // ParseMacToUllLong is a private helper only reachable through RemovePairing, which invokes
     // the real BluetoothRemoveDevice P/Invoke (a genuine hardware side effect, not unit-testable
-    // per docs/TEST-PLAN.md section 1). Adapted to assert FormatAddress's known-input ->
+    // per ai_agent_doc/TEST-PLAN.md section 1). Adapted to assert FormatAddress's known-input ->
     // known-output shape only, including the all-zero and all-FF boundary cases.
     [Theory]
     [InlineData(0x0000AABBCCDDEEFFUL, "AA:BB:CC:DD:EE:FF")]

@@ -1,15 +1,25 @@
 # Test plan for the device-blocking engine
 
 **Status: section 2 is implemented.** `DlpEndpointMonitor.Tests/` (xUnit) covers every case
-in section 2 below - 78 tests, all passing (`dotnet test DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj`).
+in section 2 below - 131 tests, all passing (`dotnet test DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj`).
 The storage-directory seam mentioned in section 2.5.1 was added (an optional constructor
 parameter on `UsbDeviceList`/`DeviceWhitelist`/`DeviceBlacklist`/`DisabledDevices`, defaulting
 to the exact prior `%ProgramData%\DlpEndpointMonitor\` behavior - see `ai_agent_doc/PROJECT.md`
 section 6), so 2.5 is
-fully covered too, not skipped. Sections 3 and 4 remain exactly as originally written - still
-manual/hardware-only, still not attempted. This file is kept as the living reference for what
-each layer covers and why; section 2's case tables now double as a map from test file to case
-id (each test method/case in `DlpEndpointMonitor.Tests/` traces back to a `T-*` id here).
+fully covered too, not skipped. Section 2.9 (added alongside the clipboard content policy
+feature, `ai_agent_doc/PROJECT.md` section 5.10) covers `ClipboardWhitelist`/`ClipboardBlacklist`
+via the same storage-directory-seam pattern, bringing the total from 78 to 104. Sections 2.10
+(`WindowsClipboardProtectionHandler`) and 2.11 (`ClipboardMonitor.EvaluatePolicy` direct
+coverage) closed the three known gaps found by an independent review of the clipboard
+protection feature (T-CMD-01 extended to cover the 15 clipboard protection commands, the
+handler's independent-enable/reevaluate-count behavior, and the shared AND-formula method
+itself), bringing the total from 104 to 131. Sections 3 and 4
+remain exactly as originally written for the device-blocking engine - still manual/hardware-only,
+still not attempted; section 3.6 adds the equivalent manual matrix for clipboard content policy
+(also hardware/desktop-session-only, not automatable, per section 1's feasibility table). This
+file is kept as the living reference for what each layer covers and why; section 2's case tables
+now double as a map from test file to case id (each test method/case in
+`DlpEndpointMonitor.Tests/` traces back to a `T-*` id here).
 
 ## 1. Is it possible? - feasibility by layer
 
@@ -25,7 +35,8 @@ remain manual/not implemented. Splitting by how much the Win32 layer gets in the
 | `Actions/BluetoothActions.cs` parsing (`ParseMacFromPath`, `ParseKindFromPath`, `FormatAddress`, `GetKindFromCoD`, `FormatHexMac`/`ParseMacToUllLong`) | **Yes** | Pure string/bit manipulation, no live radio needed. |
 | `Actions/DisplayActions.cs` (`ParseMonitorPath`) | **Yes** | Pure regex over a path string. |
 | `Core/UsbDeviceList.cs` / `UsbWhitelist.cs` / `UsbBlacklist.cs` matching + dedup (`MatchesAnyUsb`, `MatchesAnyBt`, `SameDevice`, `Add`/`Remove`/`Set`) | **Yes** (seam added - see 2.5.1) | Pure in-memory logic; the storage directory is now an optional constructor parameter (defaults to `%ProgramData%\DlpEndpointMonitor\`), so a test can point at a throwaway temp directory instead of the real files. |
-| `Core/CommandDispatcher.cs` dispatch/error handling | **Yes** | Already takes `IClipboardHandler`/`IUsbStorageHandler`/`IUsbDeviceHandler`/`IUsbProtectionHandler`/`IControlHandler` as constructor parameters - a test can hand it fakes with zero production changes. |
+| `Core/ClipboardRuleList.cs` / `ClipboardWhitelist.cs` / `ClipboardBlacklist.cs` matching + dedup (`MatchesAny`/`FindMatch`, `SameRule`, `Add`/`Remove`/`Set`/`Clear`, regex-timeout/malformed-pattern handling) | **Yes** (same storage-directory-seam pattern as `UsbDeviceList`) | Pure in-memory logic + `System.Text.RegularExpressions` - no Win32, no live clipboard needed to test the matching/persistence layer itself. See 2.9. |
+| `Core/CommandDispatcher.cs` dispatch/error handling | **Yes** | Already takes `IClipboardHandler`/`IUsbStorageHandler`/`IUsbDeviceHandler`/`IUsbProtectionHandler`/`IClipboardProtectionHandler`/`IControlHandler` as constructor parameters - a test can hand it fakes with zero production changes. |
 | `Core/EventEmitter.cs` (`Emit`, `EmitError`, `EmitInfo`) | **Yes** | Writes to `Console.Out`, which `Console.SetOut(...)` can redirect in a test - standard .NET technique, no production change. |
 | `Core/SchemaExporter.cs` (`--schema` output) | **Yes** | Pure reflection + JSON generation over a `TextWriter` you supply. |
 | `Actions/UsbActions.cs` Win32-calling methods (`DisableDevice`, `EnableDevice`, `GetGroupId`, `IsRemovable`, `HasBluetoothAncestor`, `GetBluetoothDeviceNode`, `RequestEject`, `EjectDrive`, `IsProtectedInternal`, `EnumerateConnected`, `EnumerateGroupSiblings`, `SetUsbStorageEnabled`/`IsUsbStorageEnabled`) | **No** | Real `CM_*`/SetupAPI/registry calls against the live device tree. No interface, no fake-able seam. |
@@ -33,6 +44,7 @@ remain manual/not implemented. Splitting by how much the Win32 layer gets in the
 | `Actions/DisplayActions.cs` Win32-calling methods (`DisableExternalDisplays`, `EnableExternalDisplays`, `EnumerateConnected`) | **No** | Real CCD API, needs a live display topology to observe/change. |
 | `Actions/ClipboardActions.cs` | **Partially** | Real Win32 clipboard API, but the clipboard is software-only - no special hardware, works in any interactive Windows session (not typically in a headless CI agent without a desktop session, though). |
 | **`Monitors/UsbMonitor.cs`, `BluetoothMonitor.cs`, `DisplayMonitor.cs`** - `BlockDevice`, `IsGroupCompliant`, `IsRecordCompliant`, `BlockNonCompliant`, `RestoreCompliant`, `HandleArrival` | **No, as currently structured** | These call `UsbActions`/`BluetoothActions`/`DisplayActions` as `static` methods directly - there is no interface/injection point to substitute a fake. **This is exactly the logic the recent whitelist/blacklist fix changed** - the group-compliance decision, the escalation ladder, the restore-recovery logic. It cannot be unit-tested without either real hardware or a source change (see section 4). |
+| **`Monitors/ClipboardMonitor.cs`, `KeyboardHook.cs`** - `EvaluateAndEnforce`/`ApplyPolicy`, `ShouldBlockPaste` (the copy/cut-clear and paste-swallow enforcement decisions, section 5.10) | **No, same reason** | Same as the row above: these call `ClipboardActions.Read()`/`Clear()` statically with no substitution point, and additionally need a live desktop session/clipboard (not just hardware). The AND-formula and content-scope logic they call into (`ClipboardMonitor.EvaluatePolicy`) is itself pure and IS covered - see 2.9 - only the Win32-calling wrapper around it is not. |
 | `Handlers/Windows/*` | **No, same reason** | Thin wrappers calling straight into `Actions/*` statically. |
 
 **Bottom line:** every *pure decision/parsing* rule is testable right now with an ordinary
@@ -143,7 +155,7 @@ corruption on whatever machine runs them.
 
 | # | Case | Expected |
 |---|---|---|
-| T-CMD-01 | Well-formed line for every `CommandType` | Dispatches to the correct fake handler's `Handle` overload, exactly once |
+| T-CMD-01 | Well-formed line for every `CommandType`, including all 15 clipboard protection commands (`clipboard_protection_status`, `clipboard_whitelist_*`, `clipboard_blacklist_*`) alongside the pre-existing device commands | Dispatches to the correct fake handler's `Handle` overload, exactly once |
 | T-CMD-02 | Malformed JSON (not valid JSON at all) | Emits `reply {ok:false}` with the exception message, does not throw out of `Dispatch` |
 | T-CMD-03 | Valid JSON, missing `cmd` field | Throws inside `Dispatch`'s own try/catch (`GetProperty` throws) -> caught -> `reply {ok:false}` |
 | T-CMD-04 | Valid JSON, unrecognized `cmd` string | `commandType` deserializes to `null` -> `reply {ok:false, error:"unknown command: <cmd>"}`, echoing the unrecognized string and the request `id` |
@@ -171,6 +183,93 @@ corruption on whatever machine runs them.
 | T-SCHEMA-03 | Every `EventType` member has a corresponding `$defs` entry reachable from some `IEvent` type | No event discriminant is undocumented |
 | T-SCHEMA-04 | `cmdReply` contains an entry for every command carrying `[EmitsEvent]`, and none for commands without it | Matches `Commands/Commands.cs` attribute usage exactly - a regression guard if someone adds `[EmitsEvent]` without updating callers, or vice versa |
 | T-SCHEMA-05 | Every discriminated record's schema has its discriminant field marked `required` with the right `const` value | Confirms `TransformSchemaNode` logic (this is what a consumer's type generator would rely on) |
+
+### 2.9 Clipboard whitelist/blacklist matching and dedup (`Core/ClipboardRuleList.cs`)
+
+Same storage-directory-seam pattern as 2.5 (`ClipboardRuleListTests.cs`, each test constructs its
+own throwaway temp directory, never the parameterless/real-`%ProgramData%` constructor) - no
+caveat equivalent to 2.5.1 needed since the seam already exists on this new type from the start.
+
+| # | Case | Expected |
+|---|---|---|
+| T-CLIP-LIST-01 | Whitelist disabled, any Text or Files content | `IsAllowed` returns `true` unconditionally (fail-open when off) |
+| T-CLIP-LIST-02 | Blacklist disabled, any Text or Files content | `IsBlocked` returns `false` unconditionally |
+| T-CLIP-LIST-03 | Whitelist enabled, empty entry list | `IsAllowed` returns `false` for everything (deny-all, empty enabled list) |
+| T-CLIP-LIST-04 | Blacklist enabled, empty entry list | `IsBlocked` returns `false` for everything (no rules to match) |
+| T-CLIP-LIST-05 | Blacklist entry regex against Text candidates | Matching text -> `IsBlocked` `true`; non-matching text -> `false` |
+| T-CLIP-LIST-06 | Whitelist entry regex against Text candidates | Matching text -> `IsAllowed` `true`; non-matching text -> `false` |
+| T-CLIP-LIST-07 | Blacklist Files entry, several candidate paths, one matches | `IsBlocked` true for the matching path - confirms the any-single-path-condemns aggregation the caller performs with `.Any()`, mirroring `UsbMonitor.IsGroupCompliant` |
+| T-CLIP-LIST-08 | Whitelist Files entry, several candidate paths (one matches / none match) | Whitelist gate satisfied when ANY path matches; not satisfied when none do |
+| T-CLIP-LIST-09 | Entry with `Kind` set only matches that `ClipboardKind` | A Text-scoped entry does not match a Files candidate carrying the same pattern text, and vice versa |
+| T-CLIP-LIST-10 | Entry with `Kind: null` | Matches the pattern against any `ClipboardKind` (both Text and Files) |
+| T-CLIP-LIST-11 | `SameRule` dedup: `Add` same `Pattern`+`Kind` twice, different `Label` | Second `Add` is a no-op; only one entry persists, first `Label` wins (mirrors `UsbDeviceList.SameDevice`'s label-ignored identity) |
+| T-CLIP-LIST-12 | `SameRule` dedup: `Add` same `Pattern`, different `Kind` | Both persist - `Kind` is part of identity |
+| T-CLIP-LIST-13 | `Set` with a duplicate-containing input array | Result list collapses duplicates to one per the same `SameRule` rule |
+| T-CLIP-LIST-14 | `Remove` with a `Kind` filter | Removes only the entry matching both `Pattern` and `Kind`; a same-pattern, different-kind entry survives |
+| T-CLIP-LIST-15 | `Remove` with no `Kind` filter | Removes every entry matching `Pattern` regardless of `Kind` |
+| T-CLIP-LIST-16 | `Clear` then `GetAll` | Empty list |
+| T-CLIP-LIST-17 | `Add` a pattern that fails `Regex` construction (e.g. an unbalanced group) | Does not throw; entry persists (still reported by `GetAll`) but its compiled `Regex` is `null` so it never matches anything |
+| T-CLIP-LIST-18 | Reload from disk with a persisted malformed pattern alongside a valid one | Constructor/`Load` does not throw on the malformed entry; it stays inert after reload, the valid entry still matches |
+| T-CLIP-LIST-19 | Whitelist and blacklist both `SetEnabled(true)` at the same time | Both report `IsEnabled == true` - no conflict, no forced mutual exclusion (the key divergence from device policy, section 5.10) |
+| T-CLIP-LIST-20 | AND-formula truth table: content matching neither / only the whitelist pattern / both whitelist and blacklist patterns | `whitelist.IsAllowed(...) && !blacklist.IsBlocked(...)` -> blocked / allowed / blocked respectively |
+| T-CLIP-LIST-21 | AND-formula with only blacklist enabled (whitelist left disabled) | Blacklisted content blocked, clean content allowed |
+| T-CLIP-LIST-22 | AND-formula with only whitelist enabled (blacklist left disabled) | Non-matching content blocked, matching content allowed |
+| T-CLIP-LIST-23 | `Blacklist.FindMatchedPattern` when a rule matches / when nothing matches | Returns the specific matching `Pattern` string, or `null` - this is what populates `ClipboardContentBlockedEvent.MatchedPattern` |
+| T-CLIP-LIST-24 | `Blacklist.FindMatchedPattern` when the blacklist is disabled | Returns `null` even though a rule would otherwise match |
+
+#### 2.9.1 Adversarial edge cases
+
+Found by an independent skeptical review of the merged clipboard feature, not by the original
+implementation workflow - added to `ClipboardRuleListTests.cs` alongside the section 2.9 cases
+above (same file/seam, no new test file needed). Persistence independence (whitelist's
+`IsEnabled` never leaking into blacklist's or vice versa) was considered and deliberately
+**not** added as a separate case - `ClipboardWhitelist`/`ClipboardBlacklist` already persist to
+distinct filenames (`clipboard-whitelist.json` / `clipboard-blacklist.json`) via
+`ClipboardRuleList`'s constructor, so cross-contamination is structurally impossible, not
+merely untested.
+
+| # | Case | Expected |
+|---|---|---|
+| T-CLIP-EDGE-01 | A genuine catastrophic-backtracking pattern (`^(a+)+$`) matched against an engineered non-matching input, enabled | `IsBlocked` returns `false` (timeout treated as never-matched) within a bounded wall-clock time (asserted `< 2s`, generously above the 250ms `RegexTimeout`) - proves the timeout fires at runtime, not just that malformed *construction* is caught |
+| T-CLIP-EDGE-02 | Concurrent `Add` calls from multiple threads racing with concurrent `IsBlocked` reads on one `ClipboardBlacklist` | No exception; final `GetAll()` count is deterministic (seed + one entry per writer) - mirrors the real stdin-thread-vs-keyboard-hook-thread race |
+| T-CLIP-EDGE-03 | A pattern (`"Secret"`) matched against differently-cased content (`"secret"`) | Does not match - confirms `RegexOptions.None` (no implicit case-insensitivity) anywhere in the pipeline |
+| T-CLIP-EDGE-04 | An empty-string pattern (`""`) | Matches every candidate, including the empty string itself - a technically-valid regex, not rejected or crashing |
+| T-CLIP-EDGE-05 | A pattern and candidate containing non-ASCII characters (Cyrillic text, CJK file path) | Matches correctly, same as ASCII - no accidental ASCII-only assumption in the matching pipeline |
+
+### 2.10 Clipboard protection command handler (`Handlers/Windows/WindowsClipboardProtectionHandler.cs`)
+
+`WindowsClipboardProtectionHandlerTests.cs`, same storage-directory-seam pattern as 2.9, plus a
+plain `int` call-counter (no mocking library) standing in for the `reevaluate` delegate. The
+central behavior under test is the divergence from `WindowsUsbProtectionHandler`: enabling one
+clipboard list must never force-disable the other.
+
+| # | Case | Expected |
+|---|---|---|
+| T-CLIP-HANDLER-01 | `Handle(ClipboardWhitelistEnableCmd)`, starting from blacklist disabled and (separately) blacklist already enabled | Whitelist becomes enabled; blacklist's state is completely unchanged in both starting cases |
+| T-CLIP-HANDLER-02 | `Handle(ClipboardBlacklistEnableCmd)`, symmetric starting cases for whitelist | Blacklist becomes enabled; whitelist's state is completely unchanged in both starting cases |
+| T-CLIP-HANDLER-03 | Enable both whitelist and blacklist in sequence | Both report `IsEnabled == true`; reply carries no conflict signal (unlike `DeviceProtectionStatusEvent`'s `Mode`/conflict concept, this feature has none) |
+| T-CLIP-HANDLER-04 | Every mutating command (enable/disable/clear/add/remove/set, both lists - 12 cases via `[Theory]`) | The `reevaluate` delegate fires exactly once per call |
+| T-CLIP-HANDLER-05 | `Handle(ClipboardProtectionStatusCmd)` after various enable/disable combinations | Reports the current `IsEnabled` state of both lists accurately |
+| T-CLIP-HANDLER-06 | `Handle(ClipboardWhitelistGetCmd)` after adding entries | Returned DTOs match exactly what was added (pattern/kind/label) |
+| T-CLIP-HANDLER-07 | `Handle(ClipboardBlacklistGetCmd)` after adding an entry | Returned DTO matches exactly what was added |
+
+### 2.11 `ClipboardMonitor.EvaluatePolicy` direct coverage (`Monitors/ClipboardMonitor.cs`)
+
+`ClipboardMonitorPolicyTests.cs` calls the real `internal static EvaluatePolicy` method directly
+(reachable from the test project via the assembly-level `InternalsVisibleTo` in
+`AppJsonContext.cs`) instead of re-deriving the AND-formula by hand, so a future divergence in
+the real implementation would be caught here (previously only a hand-rolled copy of the formula
+was exercised, in `ClipboardRuleListTests.cs`'s `AndFormula_*` tests).
+
+| # | Case | Expected |
+|---|---|---|
+| T-CLIP-POLICY-01 | Empty candidates list (both `Text` and `Files`), even with both lists enabled with matching rules | `Violates == false` - the method's explicit early-return for zero candidates |
+| T-CLIP-POLICY-02 | A single candidate matching both the whitelist and the blacklist simultaneously | Blacklist wins: `Violates == true`, `Reason == "blacklist_match"` |
+| T-CLIP-POLICY-03 | `Files`, 3 candidates, only the 2nd matches the blacklist | Whole operation blocked, `Reason == "blacklist_match"`, `MatchedPattern` is the actual matching pattern |
+| T-CLIP-POLICY-04 | `Files`, 3 candidates, only the 2nd matches the (enabled) whitelist, blacklist disabled | Whole operation allowed (`Violates == false`) - proves "ANY candidate satisfies whitelist" aggregation |
+| T-CLIP-POLICY-05 | `Files`, 3 candidates, whitelist enabled, none match | `Violates == true`, `Reason == "whitelist_gate"`, `MatchedPattern == null` |
+| T-CLIP-POLICY-06 | Both lists disabled | `Violates == false` regardless of content |
+| T-CLIP-POLICY-07 | A `Text`-scoped blacklist rule evaluated against a `Files`-kind call with the same matching string, and vice versa | Kind isolation holds at the `EvaluatePolicy` level, not just inside `ClipboardRuleList.FindMatch` |
 
 ---
 
@@ -240,6 +339,20 @@ test script - what to set up, what to trigger, what to check in the JSON event s
 | M-NET-04 (Bluetooth-tethered/PAN network interface, if available) | A Bluetooth PAN (Bluetooth-tethering) network interface is present | Blacklist `kind: network` | `NetworkMonitor` still applies (interface resolves to `DeviceKind.Network`), but `UsbActions.IsBuiltIn` treats it as external via the Bluetooth-ancestor check same as M-NET-01, not confused with the internal-adapter path |
 | M-NET-05 (no duplicate Bluetooth restore events) | A Bluetooth device blacklisted and then unblocked (same setup as M-BT-01/M-BT-02) | Clear the blacklist entry | Exactly **one** `bluetooth_device_unblocked` event fires for the device - not also a second `usb_device_unblocked` for the same devnode; confirms `UsbMonitor.RestoreCompliant`'s new `d.Mac is null && d.Kind != DeviceKind.Network` filter stops it from racing `BluetoothMonitor.RestoreCompliant` on the same shared `DisabledDevices` record |
 
+### 3.6 Clipboard content policy enforcement (`ClipboardMonitor` / `KeyboardHook`, section 5.10)
+
+Requires an interactive desktop session (the clipboard and the low-level keyboard hook are both
+session-scoped) - not runnable in a headless CI agent, same caveat as `Actions/ClipboardActions.cs`
+in section 1's feasibility table.
+
+| # | Setup | Action | Expected |
+|---|---|---|---|
+| M-CLIP-01 (blacklist clears a copy) | Blacklist enabled with a text pattern (e.g. a SSN-shaped regex) | Copy matching text to the clipboard | `clipboard_change` (`ClipboardTextEvent`) fires reporting the copy as normal, immediately followed by `clipboard_content_blocked` (`Reason: "blacklist_match"`, `MatchedPattern` set); the clipboard is empty afterward (`Get-Clipboard` / paste anywhere shows nothing) |
+| M-CLIP-02 (whitelisted content survives) | Whitelist enabled with a pattern that matches the content being copied, blacklist disabled | Copy matching text | `clipboard_change` fires, no `clipboard_content_blocked` follows, and the content is still on the clipboard (a paste anywhere succeeds and shows the original content) |
+| M-CLIP-03 (both lists enabled, AND-combine) | Whitelist enabled with pattern A, blacklist enabled with pattern B, both independently `SetEnabled(true)` (confirm via `clipboard_protection_status` that both report `true` with no error) | Copy content matching A but not B, then copy content matching both A and B | First copy: allowed, clipboard keeps the content. Second copy: `clipboard_content_blocked` (`blacklist_match`) fires and the clipboard is cleared - confirms the AND-formula, not just whichever list was configured last, decides the outcome |
+| M-CLIP-04 (paste interception) | Blacklist enabled with a pattern currently sitting on the clipboard (e.g. copied via `clipboard_set` command or by another app, bypassing this process's own copy-time clearing) | Focus a text field in any application and press Ctrl+V | The target application receives **nothing** (no text appears); `clipboard_content_blocked` (`Operation: "paste"`) fires; the existing `keyboard_shortcut` (`action: "paste"`) event still fires too. Then clear the blacklist and press Ctrl+V again with compliant content on the clipboard | The paste succeeds normally and the target application receives the content, confirming the swallow is verdict-specific, not a permanent block on all paste |
+| M-CLIP-05 (Image/Unknown always pass through) | Blacklist enabled with a pattern that would match "anything" (e.g. `.*`, `Kind: null`) | Copy an image (e.g. a screenshot via Print Screen) to the clipboard, then paste it | `clipboard_change` (`ClipboardImageEvent`) fires, no `clipboard_content_blocked` ever follows for the copy or the paste, and the image pastes successfully regardless of how broad the blacklist pattern is - confirms Image/Unknown content is never evaluated against these rules at all (section 5.10's content-scope limitation) |
+
 ---
 
 ## 4. If you later want automated coverage of section 3 - what a seam would look like
@@ -263,11 +376,16 @@ discussion, not something to fold into "just add tests."
 ## 5. Suggested priority if you want to act on this incrementally
 
 1. ~~Section 2's pure-logic cases (2.1-2.4, 2.6-2.8)~~ - **done**: `DlpEndpointMonitor.Tests/`,
-   78 passing tests.
+   104 passing tests.
 2. ~~Section 2.5's list-matching cases~~ - **done**: the storage-path seam (2.5.1) was added,
    so 2.5 is fully automated too, not skipped.
-3. Section 3's manual matrix - still to run by hand, as the actual acceptance test for the
+3. ~~Section 2.9's clipboard list-matching cases~~ - **done**: `ClipboardRuleListTests.cs`,
+   using the same storage-directory-seam pattern from the start.
+4. Section 3's manual matrix - still to run by hand, as the actual acceptance test for the
    whitelist/blacklist fix (this is not something the automated suite covers - see section 1's
    feasibility table).
-4. Section 4's seam - still not attempted; only worth it if ongoing regression risk in the
+5. Section 3.6's clipboard manual matrix - likewise still to run by hand; the enforcement
+   decision logic it exercises (`ClipboardMonitor`/`KeyboardHook`) is Win32/desktop-session-only,
+   same as the rest of section 3.
+6. Section 4's seam - still not attempted; only worth it if ongoing regression risk in the
    enforcement core justifies the refactor cost.

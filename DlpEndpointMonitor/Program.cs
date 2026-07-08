@@ -25,6 +25,11 @@ var whitelist = new DeviceWhitelist();
 var blacklist = new DeviceBlacklist();
 var disabled  = new DisabledDevices();
 
+// Clipboard whitelist/blacklist - independent of device policy, and (unlike device policy)
+// independently enable-able at once: no ProtectionMode/conflict concept for clipboard.
+var clipboardWhitelist = new ClipboardWhitelist();
+var clipboardBlacklist = new ClipboardBlacklist();
+
 // Conflict guard: if both lists were enabled on disk (e.g. direct file edit), disable both.
 // The client can query device_protection_status to understand the current state.
 if (whitelist.IsEnabled && blacklist.IsEnabled)
@@ -42,6 +47,7 @@ UsbMonitor?       usbMonitor       = null;
 BluetoothMonitor? bluetoothMonitor = null;
 DisplayMonitor?   displayMonitor   = null;
 NetworkMonitor?   networkMonitor   = null;
+ClipboardMonitor? clipboardMonitor = null;
 
 // ── Message loop thread ───────────────────────────────────────────────────────
 // All Win32 message-based components (clipboard listener, USB notifications,
@@ -57,13 +63,14 @@ var msgThread = new Thread(() =>
         bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist, disabled);
         displayMonitor   = new DisplayMonitor(window, whitelist, blacklist);
         networkMonitor   = new NetworkMonitor(window, whitelist, blacklist, disabled);
+        clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist);
 
-        using var clipboardMonitor = new ClipboardMonitor(window);
         using var usbMon           = usbMonitor;
         using var btMon            = bluetoothMonitor;
         using var dispMon          = displayMonitor;
         using var netMon           = networkMonitor;
-        using var keyboardHook     = new KeyboardHook();
+        using var cbMon            = clipboardMonitor;
+        using var keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist);
 
         windowReady.Set(); // unblock main thread — monitors are set before this
         EventEmitter.EmitInfo("ready");
@@ -108,6 +115,8 @@ var dispatcher = new CommandDispatcher(
     usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist,
         applyPolicy:    () => { usbMonitor!.BlockNonCompliant(); bluetoothMonitor!.BlockNonCompliant(); displayMonitor!.BlockNonCompliant(); networkMonitor!.BlockNonCompliant(); },
         restoreDevices: () => { usbMonitor!.RestoreCompliant(); bluetoothMonitor!.RestoreCompliant(); displayMonitor!.RestoreCompliant(); networkMonitor!.RestoreCompliant(); }),
+    clipboardProtection: new WindowsClipboardProtectionHandler(clipboardWhitelist, clipboardBlacklist,
+        reevaluate: () => clipboardMonitor!.ApplyPolicy()),
     control:           new WindowsControlHandler());
 
 try

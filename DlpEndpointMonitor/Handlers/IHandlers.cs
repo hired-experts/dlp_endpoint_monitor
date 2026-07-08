@@ -9,6 +9,28 @@ interface IClipboardHandler
     void Handle(ClipboardClearCmd command);
 }
 
+// Whitelist and blacklist share one interface (mirrors IUsbProtectionHandler's shape) even
+// though clipboard's enable/disable does NOT force-disable the other list - both mutate the
+// same reevaluate delegate, so keeping them together avoids two near-identical interfaces.
+interface IClipboardProtectionHandler
+{
+    void Handle(ClipboardProtectionStatusCmd command);
+    void Handle(ClipboardWhitelistEnableCmd command);
+    void Handle(ClipboardWhitelistDisableCmd command);
+    void Handle(ClipboardWhitelistGetCmd command);
+    void Handle(ClipboardWhitelistClearCmd command);
+    void Handle(ClipboardWhitelistAddCmd command);
+    void Handle(ClipboardWhitelistRemoveCmd command);
+    void Handle(ClipboardWhitelistSetCmd command);
+    void Handle(ClipboardBlacklistEnableCmd command);
+    void Handle(ClipboardBlacklistDisableCmd command);
+    void Handle(ClipboardBlacklistGetCmd command);
+    void Handle(ClipboardBlacklistClearCmd command);
+    void Handle(ClipboardBlacklistAddCmd command);
+    void Handle(ClipboardBlacklistRemoveCmd command);
+    void Handle(ClipboardBlacklistSetCmd command);
+}
+
 interface IUsbStorageHandler
 {
     void Handle(UsbEjectCmd command);
