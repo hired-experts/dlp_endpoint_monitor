@@ -25,17 +25,25 @@ internal sealed class DisabledDevicesState
 /// </summary>
 sealed class DisabledDevices
 {
-    static readonly string StorageDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "DlpEndpointMonitor");
+    // ~/.dlp - same convention the sibling Node.js agent uses for its own state, and the
+    // same directory UsbDeviceList persists whitelist/blacklist under (Core/UsbDeviceList.cs).
+    static readonly string DefaultStorageDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".dlp");
 
     readonly ReaderWriterLockSlim _lock = new();
+    readonly string               _storageDir;
     readonly string               _storagePath;
     DisabledDevicesState          _state = new();
 
-    public DisabledDevices()
+    /// <param name="storageDir">
+    /// Directory to persist under. Defaults to ~/.dlp (identical to the previous hardcoded
+    /// behavior) when null - pass an explicit directory only to isolate storage, e.g. in tests.
+    /// </param>
+    public DisabledDevices(string? storageDir = null)
     {
-        _storagePath = Path.Combine(StorageDir, "disabled-devices.json");
+        _storageDir  = storageDir ?? DefaultStorageDir;
+        _storagePath = Path.Combine(_storageDir, "disabled-devices.json");
         Load();
     }
 
@@ -73,7 +81,7 @@ sealed class DisabledDevices
     {
         try
         {
-            Directory.CreateDirectory(StorageDir);
+            Directory.CreateDirectory(_storageDir);
 
             DisabledDevicesState snapshot;
             _lock.EnterReadLock();

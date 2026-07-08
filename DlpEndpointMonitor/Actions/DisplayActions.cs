@@ -24,22 +24,27 @@ static class DisplayActions
     /// <summary>
     /// Parses a GUID_DEVINTERFACE_MONITOR device path into a <see cref="ParsedDevice"/>.
     /// Vid = 3-char EDID manufacturer code (e.g. "SAM"), Pid = 4-char product code (e.g. "0F91").
-    /// Returns null if the path does not match the DISPLAY#XXX0000 pattern.
+    /// If the path does not match the DISPLAY#XXX0000 EDID pattern, Vid/Pid fall back to "" (the
+    /// same identity-less sentinel <see cref="UsbActions.ParsePartialDevice"/> uses) rather than
+    /// returning null - an unparseable monitor must still reach policy evaluation so whitelist
+    /// mode fails closed on it instead of it being silently invisible to the compliance sweep.
+    /// Only the fully-degenerate case (no instance id survives at all) still returns null.
     /// </summary>
     public static ParsedDevice? ParseMonitorPath(string rawPath)
     {
         var match = _monitorModel.Match(rawPath);
-        if (!match.Success) return null;
+
+        string working = rawPath.StartsWith(@"\\?\") ? rawPath[4..] : rawPath;
+        working = _guidSuffix.Replace(working, "").Replace('#', '\\');
+        if (working.Length == 0) return null;
+
+        if (!match.Success)
+            return new ParsedDevice("", "", null, MonitorClassGuid, null, DeviceKind.Monitor, null, working, rawPath);
 
         string vid = match.Groups[1].Value.ToUpperInvariant();
         string pid = match.Groups[2].Value.ToUpperInvariant();
 
-        string working = rawPath.StartsWith(@"\\?\") ? rawPath[4..] : rawPath;
-        working = _guidSuffix.Replace(working, "").Replace('#', '\\');
-
-        return working.Length > 0
-            ? new ParsedDevice(vid, pid, null, MonitorClassGuid, null, DeviceKind.Monitor, null, working, rawPath)
-            : null;
+        return new ParsedDevice(vid, pid, null, MonitorClassGuid, null, DeviceKind.Monitor, null, working, rawPath);
     }
 
     /// <summary>

@@ -66,15 +66,17 @@ static class UsbActions
     /// Extracts only the instance ID from a device path that has no VID/PID
     /// (e.g. USBSTOR, ACPI). Returns a <see cref="ParsedDevice"/> with empty
     /// Vid/Pid so kind-only policy entries can still match.
-    /// Returns null for Unknown kind — those devices are not policy-relevant.
+    /// An Unknown kind is deliberately still returned (not null): an unclassifiable device
+    /// must still reach policy evaluation so whitelist mode fails closed on it (it will not
+    /// match any specific entry, so it ends up blocked) instead of silently connecting.
+    /// Blacklist mode is unaffected - it already default-allows anything that does not match
+    /// a specific entry, so this is a pure win for whitelist with no blacklist regression.
     /// </summary>
     public static ParsedDevice? ParsePartialDevice(string rawPath, DeviceKind kind)
     {
-        if (kind == DeviceKind.Unknown) return null;
-
         string working = ToInstanceId(rawPath);
         return working.Length > 0
-            ? new ParsedDevice("", "", null, null, null, DeviceKind.Unknown, null, working, rawPath)
+            ? new ParsedDevice("", "", null, null, null, kind, null, working, rawPath)
             : null;
     }
 
@@ -154,6 +156,16 @@ static class UsbActions
             }
         }
     }
+
+    /// <summary>
+    /// Yields every currently-connected interface that shares the given USB composite group
+    /// ID - i.e. every live sibling interface of the same physical device. A disabled devnode
+    /// (leaf or composite parent) has no active interface, so it never appears here; callers
+    /// that need to reason about a currently-disabled device must fall back to other means
+    /// (see <c>UsbMonitor.RestoreCompliant</c>).
+    /// </summary>
+    public static IEnumerable<ParsedDevice> EnumerateGroupSiblings(string groupId) =>
+        EnumerateConnected().Where(p => groupId.Equals(p.GroupId, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Reads the true device instance ID of a devnode via SetupDiGetDeviceInstanceId.
@@ -330,10 +342,19 @@ static class UsbActions
     ///   reports it non-removable, which is why removal policy alone wrongly protected it.)
     /// - No USB and no Bluetooth ancestor -> an internal bus (ACPI/I2C/PS2) -> built-in -> protect.
     /// Camera/Video are not strict kinds, so a built-in webcam stays blockable.
+    ///
+    /// Kind == Unknown is ALSO routed through this same bus-ancestry check (not just
+    /// StrictInputKinds). This is a safety net for whitelist mode's fail-closed behavior
+    /// (ParsePartialDevice/ParseMonitorPath no longer skip unclassifiable devices): an
+    /// internal, essential device that happens to expose only an unrecognized interface GUID
+    /// was previously never reachable here at all (silently skipped upstream), so it was never
+    /// at risk of being disabled; now that it can reach this far, it must get the same
+    /// built-in protection as a strict input kind, not be treated as blindly blockable just
+    /// because we don't know what it is.
     /// </summary>
     public static bool IsProtectedInternal(DeviceKind kind, string instanceId)
     {
-        if (!StrictInputKinds.Contains(kind)) return false;
+        if (!StrictInputKinds.Contains(kind) && kind != DeviceKind.Unknown) return false;
 
         // Check Bluetooth FIRST. A wireless BT/BLE mouse is external and blockable, but the
         // Bluetooth radio itself is frequently a USB device (e.g. USB\VID_0BDA...), which sits

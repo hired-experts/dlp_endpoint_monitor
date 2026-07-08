@@ -2,7 +2,7 @@ namespace DlpEndpointMonitor.Core;
 
 sealed class DeviceBlacklist : UsbDeviceList
 {
-    public DeviceBlacklist() : base("blacklist.json") { }
+    public DeviceBlacklist(string? storageDir = null) : base("blacklist.json", storageDir) { }
 
     /// <summary>USB device: always false when disabled. Entries with a Mac field never match USB.</summary>
     public bool IsBlocked(string vid, string pid, string? serial, DeviceKind kind)

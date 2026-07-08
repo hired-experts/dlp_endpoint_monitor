@@ -10,7 +10,7 @@ public record UsbDeviceEntry(
 
 sealed class DeviceWhitelist : UsbDeviceList
 {
-    public DeviceWhitelist() : base("whitelist.json") { }
+    public DeviceWhitelist(string? storageDir = null) : base("whitelist.json", storageDir) { }
 
     /// <summary>USB device: always true when disabled. Entries with a Mac field never match USB.</summary>
     public bool IsAllowed(string vid, string pid, string? serial, DeviceKind kind)

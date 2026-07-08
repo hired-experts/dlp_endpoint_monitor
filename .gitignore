@@ -121,3 +121,14 @@ $RECYCLE.BIN/
 # ─── Misc Linux ──────────────────────────────────────────────────────────────
 *~
 .nfs*
+
+# RUFLO and CLAUDE
+.swarm/
+ruvector.db
+.claude*
+.mcp.json
+
+# ─── AI agent workflow scripts (local orchestration, not source) ────────────
+ai_agent_doc/scripts/*.workflow.js
+ai_agent_doc/scripts/.*/
+!ai_agent_doc/scripts/_base.workflow.js

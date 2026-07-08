@@ -46,7 +46,10 @@ sealed class DisplayMonitor : IDisposable
             else if (arrived)
                 EventEmitter.Emit(new MonitorConnectedEvent(null, null, rawPath, EventEmitter.Ts()));
             else
-                EventEmitter.Emit(new MonitorDisconnectedEvent(parsed?.Vid, parsed?.Pid, rawPath, EventEmitter.Ts()));
+                EventEmitter.Emit(new MonitorDisconnectedEvent(
+                    parsed?.Vid is "" ? null : parsed?.Vid,
+                    parsed?.Pid is "" ? null : parsed?.Pid,
+                    rawPath, EventEmitter.Ts()));
         }
         catch (Exception ex)
         {
@@ -96,7 +99,10 @@ sealed class DisplayMonitor : IDisposable
         bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
                     && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
 
-        EventEmitter.Emit(new MonitorConnectedEvent(parsed.Vid, parsed.Pid, parsed.RawPath, EventEmitter.Ts()));
+        EventEmitter.Emit(new MonitorConnectedEvent(
+            string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
+            string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid,
+            parsed.RawPath, EventEmitter.Ts()));
 
         if (!allowed)
             Task.Run(() => BlockAllExternal(parsed));
@@ -174,15 +180,21 @@ sealed class DisplayMonitor : IDisposable
 
             var (ok, error) = DisplayActions.DisableExternalDisplays();
 
+            string? vid = string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid;
+            string? pid = string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid;
+
             IEvent ev = ok
-                ? new MonitorBlockedEvent(parsed.Vid, parsed.Pid, parsed.RawPath, EventEmitter.Ts())
-                : new MonitorBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.RawPath, error, EventEmitter.Ts());
+                ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, EventEmitter.Ts())
+                : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, error, EventEmitter.Ts());
 
             EventEmitter.Emit(ev);
         }
         catch (Exception ex)
         {
-            EventEmitter.Emit(new MonitorBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.RawPath, ex.Message, EventEmitter.Ts()));
+            EventEmitter.Emit(new MonitorBlockFailedEvent(
+                string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
+                string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid,
+                parsed.RawPath, ex.Message, EventEmitter.Ts()));
         }
     }
 

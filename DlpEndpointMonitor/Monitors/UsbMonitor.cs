@@ -125,17 +125,38 @@ sealed class UsbMonitor : IDisposable
     {
         try
         {
+            var all = UsbActions.EnumerateConnected().ToList();
+
+            // Bucket by composite-group so every sibling interface is judged together, not
+            // one at a time - this is what BlockDevice's own group check also does, done here
+            // once up front so BlockNonCompliant's own "allowed" logging/counting reflects it
+            // too, and so BlockDevice does not need to re-enumerate per device below.
+            // Devices with a Bluetooth ancestor are excluded from grouping: GetGroupId can
+            // resolve a Bluetooth-backed peripheral's "USB group" to the shared BT radio's own
+            // instance ID (the radio commonly sits above BTHENUM/BTHLEDEVICE in the tree), so
+            // grouping by raw GroupId there would wrongly lump unrelated devices together.
+            var byGroup = all
+                .Where(d => d.GroupId is not null && !UsbActions.HasBluetoothAncestor(d.InstanceId))
+                .GroupBy(d => d.GroupId!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => (IReadOnlyList<ParsedDevice>)g.ToList(), StringComparer.OrdinalIgnoreCase);
+
             int checked_ = 0, blocked = 0;
-            foreach (var parsed in UsbActions.EnumerateConnected())
+            foreach (var parsed in all)
             {
                 checked_++;
-                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                            && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                IReadOnlyList<ParsedDevice>? siblings =
+                    parsed.GroupId is not null && byGroup.TryGetValue(parsed.GroupId, out var s) ? s : null;
+
+                bool allowed = siblings is not null
+                    ? IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked
+                    : _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
+                        && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+
                 EventEmitter.EmitInfo($"usb_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
                 if (!allowed)
                 {
                     blocked++;
-                    Task.Run(() => BlockDevice(parsed));
+                    Task.Run(() => BlockDevice(parsed, siblings));
                 }
             }
             EventEmitter.EmitInfo($"usb_policy_apply: checked {checked_} device(s), blocking {blocked}");
@@ -144,6 +165,24 @@ sealed class UsbMonitor : IDisposable
         {
             EventEmitter.EmitError("usb_policy_apply", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Decides whether a composite USB device, as a whole, satisfies policy by checking ALL of
+    /// its currently-known sibling interfaces rather than just one. A group is allowed if ANY
+    /// sibling individually matches an active whitelist rule (or whitelist is disabled); it is
+    /// blocked if ANY sibling individually matches an active blacklist rule. This exists
+    /// because Windows enumerates one physical composite device (e.g. a keyboard) as several
+    /// independent interfaces, each possibly resolving to a different DeviceKind - without
+    /// this, a whitelist entry for one kind (e.g. "keyboard") would not protect a sibling
+    /// interface of the SAME physical device that resolves to a different kind (e.g. "hid"),
+    /// and blocking that sibling can escalate to disabling the shared composite parent,
+    /// taking the whole physical device down including the interface that WAS allowed.
+    /// </summary>
+    bool IsGroupCompliant(IEnumerable<ParsedDevice> siblings, out bool anyBlocked)
+    {
+        anyBlocked = siblings.Any(s => _blacklist.IsBlocked(s.Vid, s.Pid, s.Serial, s.Kind));
+        return siblings.Any(s => _whitelist.IsAllowed(s.Vid, s.Pid, s.Serial, s.Kind));
     }
 
     void HandleArrival(ParsedDevice parsed)
@@ -169,7 +208,7 @@ sealed class UsbMonitor : IDisposable
         }
     }
 
-    void BlockDevice(ParsedDevice parsed)
+    void BlockDevice(ParsedDevice parsed, IReadOnlyList<ParsedDevice>? knownGroupSiblings = null)
     {
         // SAFETY (criterion 5): never block a built-in keyboard / touchpad / pointing device -
         // disabling or ejecting it would brick local input on a laptop, and an eject is
@@ -183,6 +222,34 @@ sealed class UsbMonitor : IDisposable
                 "protected internal input device (built-in keyboard/touchpad) - refused to block",
                 EventEmitter.Ts()));
             return;
+        }
+
+        // Computed once, reused both for the group-compliance check below and for the
+        // usbEscalate guard further down (was two separate device-tree walks before).
+        bool hasBtAncestor = UsbActions.HasBluetoothAncestor(parsed.InstanceId);
+
+        // GROUP COMPLIANCE: a physical composite device (e.g. a keyboard) enumerates as
+        // several independent interfaces, each possibly resolving to a different DeviceKind.
+        // Before blocking THIS interface, check whether any sibling interface of the SAME
+        // physical device already satisfies policy - if so, the device as a whole is allowed
+        // and must not be touched, even though this one interface's own kind does not match.
+        // Without this, blocking a non-matching sibling can escalate to disabling the shared
+        // composite parent below, taking the whole physical device down with it. Skipped for
+        // Bluetooth-backed devices - their "group" (if any) would be the shared radio, not a
+        // meaningful sibling set.
+        if (parsed.GroupId is not null && !hasBtAncestor)
+        {
+            var siblings = knownGroupSiblings ?? UsbActions.EnumerateGroupSiblings(parsed.GroupId).ToList();
+            if (!siblings.Any(s => s.InstanceId.Equals(parsed.InstanceId, StringComparison.OrdinalIgnoreCase)))
+                siblings = [.. siblings, parsed]; // the arriving/current interface itself must vote too
+
+            if (IsGroupCompliant(siblings, out bool groupBlocked) && !groupBlocked)
+            {
+                EventEmitter.EmitInfo(
+                    $"usb_group_allowed: {parsed.InstanceId} kind={parsed.Kind} groupId={parsed.GroupId} " +
+                    "- a sibling interface satisfies whitelist, skipping block");
+                return;
+            }
         }
 
         // Track the exact devnode that ends up disabled so restore can re-enable it by
@@ -209,7 +276,7 @@ sealed class UsbMonitor : IDisposable
 
             // Escalate to the USB composite parent / eject ONLY for genuine USB devices - never
             // when there is any Bluetooth ancestor (its "group" is the shared radio).
-            bool usbEscalate = parsed.GroupId is not null && !UsbActions.HasBluetoothAncestor(parsed.InstanceId);
+            bool usbEscalate = parsed.GroupId is not null && !hasBtAncestor;
 
             // If HID-level disable was rejected, try at the USB composite device level - reversible.
             if (!ok && usbEscalate)
@@ -242,6 +309,52 @@ sealed class UsbMonitor : IDisposable
     }
 
     /// <summary>
+    /// Decides whether a persisted <see cref="DisabledDeviceRecord"/> is now compliant with
+    /// current policy - i.e. whether <see cref="RestoreCompliant"/> should re-enable it.
+    ///
+    /// The record's own stored Vid/Pid/Kind is the identity of whichever INTERFACE originally
+    /// triggered the block, which for a composite device escalated to the shared parent (e.g.
+    /// a keyboard's generic-HID sibling interface) may be the WRONG identity to re-check - it
+    /// will never match a whitelist entry scoped to the interface that was actually meant to
+    /// be allowed (e.g. "keyboard"), leaving the whole physical device stuck disabled forever
+    /// even after policy is fixed. To avoid that:
+    /// - If other sibling interfaces of the same USB group are currently live (only a single
+    ///   leaf was disabled, not the whole composite parent), compliance is derived from THEIR
+    ///   current state via <see cref="IsGroupCompliant"/> - the record's own stale identity is
+    ///   not used at all.
+    /// - If the disabled instance IS the composite parent itself and no sibling is enumerable
+    ///   right now (the whole physical device is torn down), this returns true unconditionally
+    ///   so the caller re-enables it; Windows then re-enumerates every child interface, each
+    ///   firing a fresh arrival that re-evaluates group compliance with live data via
+    ///   <see cref="BlockDevice"/>, which re-disables it (at the correct granularity) if it is
+    ///   genuinely still non-compliant. Re-enabling is reversible (unlike eject), so this is a
+    ///   safe default even though it briefly makes a possibly-non-compliant device live again -
+    ///   the same kind of live-then-evaluate window every fresh plug-in already goes through.
+    /// - Otherwise (a plain leaf disable of a non-composite device, or no group info at all),
+    ///   falls back to the record's own stored identity, same as before this method existed.
+    /// Bluetooth-backed disabled peripherals skip all of this - there is no composite-group
+    /// concept for them; they are judged by their own stored identity unconditionally.
+    /// </summary>
+    bool IsRecordCompliant(DisabledDeviceRecord d)
+    {
+        if (UsbActions.HasBluetoothAncestor(d.InstanceId))
+            return _whitelist.IsAllowed(d.Vid, d.Pid, d.Serial, d.Kind)
+                && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
+
+        string? groupId = UsbActions.GetGroupId(d.InstanceId);
+        var siblings = groupId is not null ? UsbActions.EnumerateGroupSiblings(groupId).ToList() : [];
+
+        if (siblings.Count > 0)
+            return IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked;
+
+        if (groupId is not null && groupId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase))
+            return true; // torn-down composite parent - re-enable and let fresh arrivals re-evaluate
+
+        return _whitelist.IsAllowed(d.Vid, d.Pid, d.Serial, d.Kind)
+            && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
+    }
+
+    /// <summary>
     /// Re-enables the USB devices this process disabled that the active policy no longer
     /// blocks, and forgets them. Reconciles against the PERSISTED disabled set (not a live
     /// enumeration): a disabled device has no active device interface, so it is invisible to
@@ -257,8 +370,7 @@ sealed class UsbMonitor : IDisposable
             int restored = 0, stillBlocked = 0;
             foreach (var d in _disabled.GetAll())
             {
-                bool allowed = _whitelist.IsAllowed(d.Vid, d.Pid, d.Serial, d.Kind)
-                            && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
+                bool allowed = IsRecordCompliant(d);
                 if (!allowed) { stillBlocked++; continue; }
 
                 var (ok, error) = UsbActions.EnableDevice(d.InstanceId);
