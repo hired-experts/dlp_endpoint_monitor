@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using DlpEndpointMonitor.Core;
 using DlpEndpointMonitor.Win32;
 
 
@@ -25,9 +26,21 @@ static class ClipboardActions
 
     const uint DROPEFFECT_MOVE = 2;
 
+    // WM_CLIPBOARDUPDATE can be broadcast to listeners while another process (or another
+    // listener that reacted first) still holds the clipboard open, so OpenClipboard can fail
+    // transiently for a brief window - retry a small, bounded number of times rather than
+    // treating the very first failure as "nothing happened". Kept small because Read() is also
+    // called from KeyboardHook.ShouldBlockPaste inside a global low-level keyboard hook, which
+    // Windows can silently unhook if the callback takes too long.
+    static readonly int OpenClipboardMaxAttempts = 5;
+    static readonly TimeSpan OpenClipboardRetryDelay = TimeSpan.FromMilliseconds(10);
+
+    static bool TryOpenClipboard() =>
+        RetryPolicy.Execute(() => NativeMethods.OpenClipboard(IntPtr.Zero), OpenClipboardMaxAttempts, OpenClipboardRetryDelay);
+
     public static ClipboardContent? Read()
     {
-        if (!NativeMethods.OpenClipboard(IntPtr.Zero))
+        if (!TryOpenClipboard())
         {
             return null;
         }
@@ -57,7 +70,7 @@ static class ClipboardActions
         Marshal.Copy(bytes, 0, ptr, bytes.Length);
         NativeMethods.GlobalUnlock(hMem);
 
-        if (!NativeMethods.OpenClipboard(IntPtr.Zero))
+        if (!TryOpenClipboard())
         {
             return false;
         }
@@ -76,7 +89,7 @@ static class ClipboardActions
 
     public static bool Clear()
     {
-        if (!NativeMethods.OpenClipboard(IntPtr.Zero))
+        if (!TryOpenClipboard())
         {
             return false;
         }

@@ -173,7 +173,7 @@ abstract class ClipboardRuleList
             Regex? regex = null;
             try
             {
-                regex = new Regex(entry.Pattern, RegexOptions.None, RegexTimeout);
+                regex = new Regex(entry.Pattern, RegexOptions.IgnoreCase, RegexTimeout);
             }
             catch (ArgumentException ex)
             {

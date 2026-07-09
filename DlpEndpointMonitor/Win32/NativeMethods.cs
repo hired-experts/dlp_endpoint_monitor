@@ -293,7 +293,9 @@ static class NativeMethods
     public const int  HC_ACTION       = 0;
     public const uint WM_KEYDOWN      = 0x0100;
     public const uint WM_SYSKEYDOWN   = 0x0104;
+    public const uint VK_SHIFT        = 0x10;
     public const uint VK_CONTROL      = 0x11;
+    public const uint VK_INSERT       = 0x2D;
     public const uint VK_C            = 0x43;
     public const uint VK_X            = 0x58;
     public const uint VK_V            = 0x56;

@@ -14,11 +14,13 @@ sealed class KeyboardHook : IDisposable
     readonly HookProc _proc; // keep the delegate alive
     readonly ClipboardWhitelist _whitelist;
     readonly ClipboardBlacklist _blacklist;
+    readonly ClipboardOperationHint _cutHint;
 
-    public KeyboardHook(ClipboardWhitelist whitelist, ClipboardBlacklist blacklist)
+    public KeyboardHook(ClipboardWhitelist whitelist, ClipboardBlacklist blacklist, ClipboardOperationHint cutHint)
     {
         _whitelist = whitelist;
         _blacklist = blacklist;
+        _cutHint   = cutHint;
         _proc  = Callback;
         _hHook = NativeMethods.SetWindowsHookEx(
             NativeMethods.WH_KEYBOARD_LL,
@@ -38,28 +40,41 @@ sealed class KeyboardHook : IDisposable
 
             if (msg is NativeMethods.WM_KEYDOWN or NativeMethods.WM_SYSKEYDOWN)
             {
-                var kb   = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-                bool ctrl = (NativeMethods.GetAsyncKeyState((int)NativeMethods.VK_CONTROL) & 0x8000) != 0;
+                var kb    = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
+                bool ctrl  = (NativeMethods.GetAsyncKeyState((int)NativeMethods.VK_CONTROL) & 0x8000) != 0;
+                bool shift = (NativeMethods.GetAsyncKeyState((int)NativeMethods.VK_SHIFT) & 0x8000) != 0;
 
-                if (ctrl)
+                // Shift+Insert is the classic alternate paste shortcut (pre-dates Ctrl+V in some
+                // terminals/apps, still widely supported) - it is just as visible to this
+                // low-level hook as Ctrl+V, so it gets the same detection/blocking. Right-click
+                // Paste, an app's own Paste button/menu/API call are NOT keystrokes at all and
+                // remain outside what any keyboard hook can see - see AGENTS.md section 10.
+                string? action = ctrl switch
                 {
-                    string? action = kb.vkCode switch
-                    {
-                        NativeMethods.VK_C => "copy",
-                        NativeMethods.VK_X => "cut",
-                        NativeMethods.VK_V => "paste",
-                        NativeMethods.VK_Z => "undo",
-                        _                  => null
-                    };
+                    true when kb.vkCode == NativeMethods.VK_C => "copy",
+                    true when kb.vkCode == NativeMethods.VK_X => "cut",
+                    true when kb.vkCode == NativeMethods.VK_V => "paste",
+                    true when kb.vkCode == NativeMethods.VK_Z => "undo",
+                    _ => shift && kb.vkCode == NativeMethods.VK_INSERT ? "paste" : null
+                };
 
-                    if (action is not null)
+                if (action is not null)
+                {
+                    EventEmitter.Emit(new KeyboardShortcutEvent(action, EventEmitter.Ts()));
+
+                    // Windows gives no clipboard-format signal distinguishing a plain-text cut
+                    // from a copy (unlike Explorer's file-drag "Preferred DropEffect" convention,
+                    // which ClipboardActions.ReadDropEffect already reads correctly for Files) -
+                    // mark it here so ClipboardMonitor's next WM_CLIPBOARDUPDATE-driven read can
+                    // report "cut" instead of ClipboardActions.TryReadText()'s hardcoded "copy".
+                    if (action == "cut")
                     {
-                        EventEmitter.Emit(new KeyboardShortcutEvent(action, EventEmitter.Ts()));
+                        _cutHint.MarkCut();
                     }
 
-                    // Only Ctrl+V is interceptable this way (right-click Paste, Shift+Insert,
-                    // an app's own Paste button/API are not) - swallow the keystroke only on the
-                    // explicit, deliberate "policy violated" verdict below.
+                    // Ctrl+V and Shift+Insert are the only paste triggers interceptable this way -
+                    // swallow the keystroke only on the explicit, deliberate "policy violated"
+                    // verdict below.
                     if (action == "paste" && ShouldBlockPaste())
                     {
                         return (IntPtr)1; // non-zero, no CallNextHookEx — keystroke never reaches any application
@@ -85,7 +100,11 @@ sealed class KeyboardHook : IDisposable
         try
         {
             var content = ClipboardActions.Read();
-            if (content is null) return false;
+            if (content is null)
+            {
+                EventEmitter.EmitError("clipboard_read_failed", "could not open clipboard after retries");
+                return false;
+            }
 
             // Always report what is being pasted, regardless of verdict - this is what
             // satisfies "detect what is being pasted", same event shapes as copy/cut.

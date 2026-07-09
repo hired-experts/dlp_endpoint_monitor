@@ -496,11 +496,11 @@ public class ClipboardRuleListTests
         });
     }
 
-    // T-CLIP-EDGE-03: RebuildCompiled always constructs with RegexOptions.None - proves no
-    // implicit case-insensitivity is silently applied anywhere in the matching pipeline; an
-    // operator relying on case sensitivity to scope a rule narrowly must be able to trust it.
+    // T-CLIP-EDGE-03: RebuildCompiled always constructs with RegexOptions.IgnoreCase - an
+    // operator blocking "google.com" must also catch "Google.COM"/"GOOGLE.com" rather than
+    // relying on every caller to submit every case variant of a pattern.
     [Fact]
-    public void Blacklist_PatternMatching_IsCaseSensitiveByDefault()
+    public void Blacklist_PatternMatching_IsCaseInsensitive()
     {
         WithTempDir(dir =>
         {
@@ -509,7 +509,8 @@ public class ClipboardRuleListTests
             blacklist.SetEnabled(true);
 
             Assert.True(blacklist.IsBlocked(ClipboardKind.Text, "this is Secret"));
-            Assert.False(blacklist.IsBlocked(ClipboardKind.Text, "this is secret"));
+            Assert.True(blacklist.IsBlocked(ClipboardKind.Text, "this is secret"));
+            Assert.True(blacklist.IsBlocked(ClipboardKind.Text, "this is SECRET"));
         });
     }
 

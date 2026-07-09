@@ -93,6 +93,9 @@ DlpEndpointMonitor/
                               ReaderWriterLockSlim + atomic-temp-file-write persistence shape
     ClipboardWhitelist.cs     ClipboardWhitelist : ClipboardRuleList (IsAllowed)
     ClipboardBlacklist.cs     ClipboardBlacklist : ClipboardRuleList (IsBlocked, FindMatchedPattern)
+    ClipboardOperationHint.cs correlates KeyboardHook's Ctrl+X detection with ClipboardMonitor's
+                              next clipboard read, so a text cut reports "cut" instead of
+                              ClipboardActions.TryReadText()'s hardcoded "copy" - see section 10
     MessageWindow.cs          hidden Win32 window + message pump (clipboard/device/display events)
     JsonDiscriminantAttribute.cs   maps an enum value to the JSON field it discriminates on
     EmitsEventAttribute.cs    documents which event a command replies with (used by SchemaExporter)
@@ -548,6 +551,40 @@ what is and is not covered and why.
   relying on a connect-after-launch race, since the new process becoming the owner and starting
   its pipe server is not instantaneous. See `ai_agent_doc/PROJECT.md` section 11 for the full
   queueing/coalesce/cap policy this feeds into.
+- **Windows gives no clipboard-format signal distinguishing a plain-text cut from a copy** -
+  unlike Explorer's file-drag convention (a synthetic "Preferred DropEffect" format,
+  `ClipboardActions.ReadDropEffect`, correctly read for Files), so `ClipboardActions.TryReadText()`
+  cannot determine cut-vs-copy from the clipboard content alone and would hardcode "copy" for
+  every text change including a genuine cut. `Core/ClipboardOperationHint.cs` closes this gap by
+  correlating `KeyboardHook`'s Ctrl+X detection with `ClipboardMonitor`'s next
+  `WM_CLIPBOARDUPDATE`-driven read - both run on the same STA message-pump thread (`Program.cs`),
+  and the low-level keyboard hook always observes Ctrl+X before the resulting clipboard change is
+  dispatched (an input-pipeline hook fires before the target app even processes the keystroke), so
+  no locking is needed, just the hint's own short recency window as a safety net. Only Text needs
+  this - Files already gets a correct cut/copy signal from the drop-effect format.
+- **OpenClipboard can transiently fail even when nothing is actually wrong.** Windows can
+  broadcast `WM_CLIPBOARDUPDATE` to listeners while another process (or another listener that
+  reacted first) still holds the clipboard open, so a single unretried `OpenClipboard` call can
+  return `ERROR_ACCESS_DENIED` for a brief window on a perfectly normal copy/cut/paste.
+  `Actions/ClipboardActions.cs` retries every `OpenClipboard` call (`Read()`, `SetText()`,
+  `Clear()`) through the generic `Core/RetryPolicy.cs` helper with a small, bounded budget
+  (5 attempts, 10ms apart - worst case ~40ms) rather than hand-rolling a loop at each call site;
+  kept deliberately small because `Read()` is also called from `KeyboardHook.ShouldBlockPaste`
+  inside a global low-level keyboard hook, which Windows can silently unhook if the callback
+  takes too long. A persistent failure (all retries exhausted, `Read()` still returns `null`) is
+  no longer silently swallowed - both `ClipboardMonitor.OnClipboardChanged` and
+  `KeyboardHook.ShouldBlockPaste` now emit `EventEmitter.EmitError("clipboard_read_failed", ...)`
+  for visibility before returning, without changing `ShouldBlockPaste`'s fail-open guarantee.
+- **Paste blocking only sees paste triggered by a keystroke - Ctrl+V and Shift+Insert, nothing
+  else.** `KeyboardHook.Callback` detects both (Shift+Insert is the classic alternate paste
+  shortcut, just as visible to a low-level keyboard hook as Ctrl+V), but right-click Paste, an
+  app's own Paste button/menu item, or an app calling `GetClipboardData` internally are not
+  keystrokes at all - there is no OS-level "a paste just happened" notification independent of
+  the input action that triggers it (unlike copy/cut, which `WM_CLIPBOARDUPDATE` reports
+  regardless of how the clipboard was written). Closing that remaining gap would require API
+  hooking/code injection into every target process - a fundamentally different, far more
+  invasive architecture (fragile across app updates, and exactly the technique antivirus/EDR
+  flags as rootkit-like) - not a small addition like this one.
 
 ---
 

@@ -147,7 +147,7 @@ separate from device whitelist/blacklist: entries are `ClipboardRuleEntry(Patter
 Label?)` — a regex pattern optionally scoped to a `ClipboardKind`, not a device identity.
 
 - **Pattern syntax**: raw .NET `System.Text.RegularExpressions.Regex`, no custom DSL.
-- **Case-sensitive**: matched with `RegexOptions.None` — no `IgnoreCase`.
+- **Case-insensitive**: matched with `RegexOptions.IgnoreCase`.
 - **Compiled once per mutation/load** (`RebuildCompiled`), not re-parsed on the hot path
   (the keyboard hook's per-keystroke Ctrl+V check), and every `Regex` carries a hard
   **250ms timeout** — a `RegexMatchTimeoutException` is caught and treated as "did not
@@ -177,8 +177,9 @@ Label?)` — a regex pattern optionally scoped to a `ClipboardKind`, not a devic
 - **Enforcement is two-layer**: copy/cut is caught by `ClipboardMonitor` on
   `WM_CLIPBOARDUPDATE` (clears the clipboard on violation, emits
   `ClipboardContentBlockedEvent`/`ClipboardContentBlockFailedEvent`); paste is caught by
-  `KeyboardHook` live-evaluating clipboard content on Ctrl+V keydown and swallowing the
-  keystroke on violation.
+  `KeyboardHook` live-evaluating clipboard content on Ctrl+V or Shift+Insert keydown and
+  swallowing the keystroke on violation. Right-click Paste and an app's own Paste button/menu/API
+  call are not keystrokes and remain outside what any keyboard hook can see.
 - **Paste fails OPEN, not closed** — the opposite default from device blocking.
   `KeyboardHook.ShouldBlockPaste` is wrapped in try/catch; on any exception it returns
   `false` (do not block) and falls through to `CallNextHookEx`, because this is a global

@@ -8,12 +8,14 @@ sealed class ClipboardMonitor : IDisposable
     readonly MessageWindow      _window;
     readonly ClipboardWhitelist _whitelist;
     readonly ClipboardBlacklist _blacklist;
+    readonly ClipboardOperationHint _cutHint;
 
-    public ClipboardMonitor(MessageWindow window, ClipboardWhitelist whitelist, ClipboardBlacklist blacklist)
+    public ClipboardMonitor(MessageWindow window, ClipboardWhitelist whitelist, ClipboardBlacklist blacklist, ClipboardOperationHint cutHint)
     {
         _window    = window;
         _whitelist = whitelist;
         _blacklist = blacklist;
+        _cutHint   = cutHint;
         _window.ClipboardChanged += OnClipboardChanged;
     }
 
@@ -22,7 +24,20 @@ sealed class ClipboardMonitor : IDisposable
         try
         {
             var content = ClipboardActions.Read();
-            if (content is null) return;
+            if (content is null)
+            {
+                EventEmitter.EmitError("clipboard_read_failed", "could not open clipboard after retries");
+                return;
+            }
+
+            // Consumed unconditionally (regardless of content type) so a cut hint can never
+            // bleed into a later, unrelated clipboard change - see ClipboardOperationHint's own
+            // doc comment. Only Text needs the override: Files already correctly distinguishes
+            // cut/copy via ClipboardActions.ReadDropEffect (Explorer's own drop-effect format).
+            bool recentCut = _cutHint.ConsumeRecentCut();
+            if (recentCut && content.Type == ClipboardContentType.Text)
+                content = content with { Operation = "cut" };
+
             EvaluateAndEnforce(content);
         }
         catch (Exception ex)

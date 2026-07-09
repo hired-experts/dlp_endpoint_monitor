@@ -245,7 +245,7 @@ merely untested.
 |---|---|---|
 | T-CLIP-EDGE-01 | A genuine catastrophic-backtracking pattern (`^(a+)+$`) matched against an engineered non-matching input, enabled | `IsBlocked` returns `false` (timeout treated as never-matched) within a bounded wall-clock time (asserted `< 2s`, generously above the 250ms `RegexTimeout`) - proves the timeout fires at runtime, not just that malformed *construction* is caught |
 | T-CLIP-EDGE-02 | Concurrent `Add` calls from multiple threads racing with concurrent `IsBlocked` reads on one `ClipboardBlacklist` | No exception; final `GetAll()` count is deterministic (seed + one entry per writer) - mirrors the real stdin-thread-vs-keyboard-hook-thread race |
-| T-CLIP-EDGE-03 | A pattern (`"Secret"`) matched against differently-cased content (`"secret"`) | Does not match - confirms `RegexOptions.None` (no implicit case-insensitivity) anywhere in the pipeline |
+| T-CLIP-EDGE-03 | A pattern (`"Secret"`) matched against differently-cased content (`"secret"`, `"SECRET"`) | Matches both - confirms `RegexOptions.IgnoreCase` applies uniformly across the matching pipeline |
 | T-CLIP-EDGE-04 | An empty-string pattern (`""`) | Matches every candidate, including the empty string itself - a technically-valid regex, not rejected or crashing |
 | T-CLIP-EDGE-05 | A pattern and candidate containing non-ASCII characters (Cyrillic text, CJK file path) | Matches correctly, same as ASCII - no accidental ASCII-only assumption in the matching pipeline |
 

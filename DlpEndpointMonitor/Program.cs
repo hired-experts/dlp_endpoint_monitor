@@ -29,6 +29,7 @@ var disabled  = new DisabledDevices();
 // independently enable-able at once: no ProtectionMode/conflict concept for clipboard.
 var clipboardWhitelist = new ClipboardWhitelist();
 var clipboardBlacklist = new ClipboardBlacklist();
+var clipboardCutHint   = new ClipboardOperationHint();
 
 // Conflict guard: if both lists were enabled on disk (e.g. direct file edit), disable both.
 // The client can query device_protection_status to understand the current state.
@@ -63,14 +64,14 @@ var msgThread = new Thread(() =>
         bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist, disabled);
         displayMonitor   = new DisplayMonitor(window, whitelist, blacklist);
         networkMonitor   = new NetworkMonitor(window, whitelist, blacklist, disabled);
-        clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist);
+        clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
 
         using var usbMon           = usbMonitor;
         using var btMon            = bluetoothMonitor;
         using var dispMon          = displayMonitor;
         using var netMon           = networkMonitor;
         using var cbMon            = clipboardMonitor;
-        using var keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist);
+        using var keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
 
         windowReady.Set(); // unblock main thread — monitors are set before this
         EventEmitter.EmitInfo("ready");
