@@ -43,7 +43,7 @@ public class AlertQueueTests
         // Same key, arrives while "Second" is still pending (not dequeued) - folds in as +1.
         queue.Enqueue(Make(AlertType.Toast, AlertSeverity.Warning, "Third"));
         // A different key must never coalesce with the above, regardless of ordering.
-        queue.Enqueue(Make(AlertType.Modal, AlertSeverity.Blocked, "Unrelated"));
+        queue.Enqueue(Make(AlertType.FullScreen, AlertSeverity.Blocked, "Unrelated"));
 
         releaseShow.Release();
         Assert.True(showEntered.Wait(TimeSpan.FromSeconds(5)));
@@ -75,17 +75,19 @@ public class AlertQueueTests
             Assert.True(releaseShow.Wait(TimeSpan.FromSeconds(5)));
         }
 
-        // 7 distinct (Type, Severity) keys: one to occupy "currently showing", five to fill the
-        // pending cap, one more to overflow it.
+        // Only 6 distinct (Type, Severity) keys exist (2 types x 3 severities): one to occupy
+        // "currently showing", five to fill the pending cap. The overflow entry below reuses
+        // combos[0]'s key rather than needing a 7th distinct combo - that key is removed from
+        // the coalesce map the instant "Showing" is dequeued (see AlertQueue.DispatchLoopAsync),
+        // so it is free again and this is a genuinely new pending entry, not a coalesce.
         (AlertType Type, AlertSeverity Severity)[] combos =
         [
-            (AlertType.Modal, AlertSeverity.Info),
-            (AlertType.Modal, AlertSeverity.Warning),
-            (AlertType.Modal, AlertSeverity.Blocked),
             (AlertType.Toast, AlertSeverity.Info),
             (AlertType.Toast, AlertSeverity.Warning),
             (AlertType.Toast, AlertSeverity.Blocked),
             (AlertType.FullScreen, AlertSeverity.Info),
+            (AlertType.FullScreen, AlertSeverity.Warning),
+            (AlertType.FullScreen, AlertSeverity.Blocked),
         ];
 
         using var queue = new AlertQueue(Show);
@@ -101,9 +103,9 @@ public class AlertQueueTests
         Console.SetError(errorWriter);
         try
         {
-            // Pending queue is already at MaxPending (5) - this distinct-key 6th entry must be
+            // Pending queue is already at MaxPending (5) - this 6th distinct-key entry must be
             // dropped, not queued as a 6th pending slot.
-            queue.Enqueue(Make(combos[6].Type, combos[6].Severity, "Overflow"));
+            queue.Enqueue(Make(combos[0].Type, combos[0].Severity, "Overflow"));
         }
         finally
         {

@@ -2,11 +2,11 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-        Shared by every clickable button in AlertBox/ModalWindow (Copy, the X close button,
-        Acknowledge) so all three get the same small, consistent corner radius instead of each
-        button falling back to WPF's default square-cornered Button chrome. A plain Border-based
-        template (not a copy of the default theme chrome) since all that's needed here is a
-        rounded background - no focus/checked states beyond hover/pressed.
+        Shared by every clickable button in AlertBox (Copy, the X close button) so both get the
+        same small, consistent corner radius instead of each button falling back to WPF's default
+        square-cornered Button chrome. A plain Border-based template (not a copy of the default
+        theme chrome) since all that's needed here is a rounded background - no focus/checked
+        states beyond hover/pressed.
     -->
     <Style x:Key="AlertButtonStyle" TargetType="Button">
         <Setter Property="Cursor" Value="Hand"/>

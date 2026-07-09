@@ -16,6 +16,12 @@ static class PipeTransport
 {
     const int ConnectTimeoutMs = 2000;
 
+    // A connected client that never finishes sending its one line (frozen, killed mid-write)
+    // must not block this pipe forever - only one instance is accepted at a time, so a stalled
+    // client would otherwise starve every later alert in the session. 5s gives a slow/loaded
+    // machine slack while still bounding the wait.
+    const int ReadInactivityTimeoutMs = 5000;
+
     /// <summary>
     /// Sends one AlertRequest to whichever AlertHost instance currently owns this session's
     /// pipe. Returns false (never throws) if no owner is listening - the caller decides what
@@ -99,7 +105,21 @@ static class PipeTransport
             using var reader = new StreamReader(pipe);
             while (!token.IsCancellationRequested)
             {
-                string? line = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                using var readTimeout = new CancellationTokenSource(ReadInactivityTimeoutMs);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, readTimeout.Token);
+
+                string? line;
+                try
+                {
+                    line = await reader.ReadLineAsync(linked.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    // Timed out waiting on this client specifically (not a server shutdown) -
+                    // drop the connection and free the pipe slot for the next caller.
+                    Console.Error.WriteLine("[AlertHost] dropping stalled pipe client: no line received within timeout");
+                    return;
+                }
                 if (line is null) break; // client disconnected
                 if (line.Length == 0) continue;
 

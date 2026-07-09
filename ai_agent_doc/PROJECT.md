@@ -1178,33 +1178,30 @@ time, applying two policies as requests are enqueued:
 The dispatcher loop calls its `show` callback synchronously and blocks until the callback
 returns - `App.ShowAlertWindow` hops onto the WPF dispatcher thread via `Dispatcher.Invoke` (not
 `InvokeAsync`/`BeginInvoke`, specifically so the call blocks) and calls `Window.ShowDialog()`,
-which itself blocks until the window is dismissed (Modal: acknowledged; Toast/FullScreen: timer
-elapsed or clicked). That is the entire mechanism behind "never two windows visible at once" -
-no separate visibility-tracking state is needed.
+which itself blocks until the window is dismissed (timer elapsed or clicked). That is the entire
+mechanism behind "never two windows visible at once" - no separate visibility-tracking state is
+needed.
 
 ### 11.5 Visual design and where the color palette came from
 
-All three `AlertType` values (`Modal`, `Toast`, `FullScreen`) share one visual shape - a single
-reusable control, `AlertHost/Controls/AlertBox.xaml(.cs)` - a rounded box (20px corner radius)
-with a colored header band across the top (`Title`, white foreground) and a plain white body
-below (`Message`, run through `RichTextParser`, section 11.6). They differ only in size,
-placement, and backdrop:
+Both `AlertType` values (`Toast`, `FullScreen`) share one visual shape - a single reusable
+control, `AlertHost/Controls/AlertBox.xaml(.cs)` - a rounded box (20px corner radius) with a
+colored header band across the top (`Title`, white foreground) and a plain white body below
+(`Message`, run through `RichTextParser`, section 11.6). They differ only in size, placement, and
+backdrop:
 
-- **Modal** - small/medium window, centered on the primary screen, custom chrome (no OS title
-  bar) using the `AlertBox` directly as the window content. Does **not** auto-close on a timer -
-  it requires an explicit Acknowledge/OK click, since this is the "user must acknowledge" type.
-  Keeps a taskbar entry (unlike Toast/FullScreen) since it persists until dismissed, not
-  transient.
 - **Toast** - small window anchored to the bottom-right screen corner (common OS toast
   convention), auto-closes after `DurationSeconds` (default 5) or on a click anywhere on it.
   `ShowInTaskbar="False"` - transient, should not clutter the taskbar.
 - **FullScreen** - covers the entire screen edge-to-edge, filled solid with the severity color as
   the backdrop, with the same rounded `AlertBox` centered on top in white, so the visual reads as
   one continuous severity color from the screen edge through the header band, breaking to white
-  only for the body. Auto-closes the same way as Toast. `ShowInTaskbar="False"`.
+  only for the body. Auto-closes the same way as Toast. `ShowInTaskbar="False"`. Also the fail-safe
+  fallback in `App.ShowAlertWindow`'s switch for any future/unmapped `AlertType`, since it is the
+  hardest of the two to miss.
 
-All three are `Topmost="True"` - the entire point of an alert is that it is not hidden behind
-another window.
+Both are `Topmost="True"` - the entire point of an alert is that it is not hidden behind another
+window.
 
 Severity maps to color (`AlertHost/Resources/Colors.xaml`, consumed everywhere through
 `Controls/SeverityBrushes.cs` so there is exactly one place mapping `AlertSeverity` to a brush):
@@ -1239,11 +1236,11 @@ records/enums + one `System.Text.Json` source-gen `JsonSerializerContext`
 one deliberate reflection exception applies here: introducing a second reflection-based JSON
 path anywhere in this dependency chain would compromise the main binary's trimmed,
 self-contained build. `AlertRequest(Type, Title, Message, Id, Severity = Info, DurationSeconds = 5)` -
-`Id` is a required correlation field for every alert type (Modal, Toast, FullScreen), not
+`Id` is a required correlation field for every alert type (Toast, FullScreen), not
 optional; both `AlertActions.ShowAlert` and `AlertHost.AlertQueue.Enqueue` reject a
 null/blank `Id` rather than showing an uncorrelatable alert, since a JSON-deserialized request
 can carry a blank string despite the compile-time non-nullable signature.
-`AlertType { Modal, Toast, FullScreen }`, `AlertSeverity { Info, Warning, Blocked }`,
+`AlertType { Toast, FullScreen }`, `AlertSeverity { Info, Warning, Blocked }`,
 `AlertPipe.Name` (the one shared pipe-name constant, section 11.2).
 
 ### 11.8 What is deliberately out of scope here

@@ -1,8 +1,10 @@
+using System.Text.Json.Serialization;
+
 namespace DlpEndpointMonitor.AlertContracts;
 
+[JsonConverter(typeof(JsonStringEnumConverter<AlertType>))]
 public enum AlertType
 {
-    Modal,
-    Toast,
-    FullScreen
+    [JsonStringEnumMemberName("toast")]      Toast,
+    [JsonStringEnumMemberName("fullScreen")] FullScreen
 }

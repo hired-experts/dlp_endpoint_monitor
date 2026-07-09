@@ -103,9 +103,9 @@ public sealed class AlertQueue : IDisposable
 
             try
             {
-                // Expected to block until the alert window is dismissed (Modal: acknowledged;
-                // Toast/FullScreen: timer or click) so this loop naturally never shows two
-                // windows at once - added in a later iteration, a stub for now.
+                // Expected to block until the alert window is dismissed (timer or click) so this
+                // loop naturally never shows two windows at once - added in a later iteration, a
+                // stub for now.
                 _show(toShow);
             }
             catch (Exception ex)

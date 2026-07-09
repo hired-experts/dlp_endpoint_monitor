@@ -24,7 +24,7 @@ pairing, or turns off the external display) without waiting to be told.
 | `DlpEndpointMonitor` | The shipped binary — `net10.0`, trimmed, single-file, self-contained `win-x64`, zero NuGet dependencies |
 | `DlpEndpointMonitor.Tests` | xUnit tests for the hardware-independent pure-logic layer |
 | `DlpEndpointMonitor.AlertContracts` | Dependency-free plain records/enums shared between the main binary and AlertHost (wire format for UI alerts) |
-| `DlpEndpointMonitor.AlertHost` | Companion WPF app (`net10.0-windows`) that shows Modal/Toast/FullScreen alert windows in the interactive user's session |
+| `DlpEndpointMonitor.AlertHost` | Companion WPF app (`net10.0-windows`) that shows Toast/FullScreen alert windows in the interactive user's session |
 | `DlpEndpointMonitor.AlertHost.Tests` | xUnit tests for AlertHost's pure-logic pieces (`AlertQueue`, `RichTextParser`) |
 
 ## 2. Build & run
@@ -235,9 +235,8 @@ public sealed record AlertRequest(
 
 | `AlertType` | Behavior |
 |---|---|
-| `Modal` | Must be acknowledged; also the fail-safe fallback for any unmapped type |
 | `Toast` | Auto-dismisses (timer-driven) |
-| `FullScreen` | Full-screen, blocking alert |
+| `FullScreen` | Full-screen, blocking alert; also the fail-safe fallback for any unmapped type |
 
 | `AlertSeverity` | Values |
 |---|---|

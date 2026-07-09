@@ -152,7 +152,7 @@ DlpEndpointMonitor.AlertContracts/   plain net10.0 class library (no -windows TF
 DlpEndpointMonitor.AlertHost/   companion WPF app (net10.0-windows, OutputType WinExe), NOT
                              started by DlpEndpointMonitor.csproj's own build/publish - it is a
                              separate deployable exe, launched on demand by
-                             Actions/AlertActions.cs. Shows a Modal/Toast/FullScreen alert window
+                             Actions/AlertActions.cs. Shows a Toast/FullScreen alert window
                              in the interactive user's session (this binary itself may be running
                              headless in Session 0). App.xaml.cs (mutex-guarded singleton
                              startup, --initial-alert arg parsing), AlertQueue.cs (coalesce/cap
@@ -160,7 +160,7 @@ DlpEndpointMonitor.AlertHost/   companion WPF app (net10.0-windows, OutputType W
                              RichTextParser.cs (the closed `<strong>/<b>/<em>/<i>/<br>` inline-tag
                              allowlist), Resources/Colors.xaml (severity/surface brushes),
                              Controls/AlertBox.xaml(.cs) (the one shared rounded-box+header-band
-                             control), Windows/ModalWindow|ToastWindow|FullScreenWindow.xaml(.cs).
+                             control), Windows/ToastWindow|FullScreenWindow.xaml(.cs).
                              See ai_agent_doc/PROJECT.md section 11 for the full delivery-mechanism
                              design (why a second process, mutex/pipe singleton, session-crossing
                              launch, queueing policy, visual design, color-token provenance) and

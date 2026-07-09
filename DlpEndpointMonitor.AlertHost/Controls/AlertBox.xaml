@@ -2,7 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <!--
-        The one shape shared by all three alert window types (Modal/Toast/FullScreen): a rounded
+        The one shape shared by both alert window types (Toast/FullScreen): a rounded
         box with a colored header band on top (Severity color, white text) and a plain white
         body below (Message) - the two window types differ only in size/placement/backdrop
         around this control, never in this content shape, per CRITERIA.
@@ -52,9 +52,9 @@
                     <TextBlock x:Name="TitleText" Grid.Column="0" FontSize="18" FontWeight="SemiBold"
                                TextWrapping="Wrap" VerticalAlignment="Center"/>
                     <!-- Opt-in per window type via ShowCloseButton (only ToastWindow enables this
-                         today - Modal has its own Acknowledge button, FullScreen keeps its
-                         click-the-backdrop-to-dismiss behavior) - collapsed by default so it
-                         reserves no layout space unless a window explicitly asks for it. -->
+                         today - FullScreen keeps its click-the-backdrop-to-dismiss behavior) -
+                         collapsed by default so it reserves no layout space unless a window
+                         explicitly asks for it. -->
                     <Button x:Name="CloseButton"
                             Grid.Column="1"
                             Style="{DynamicResource AlertButtonStyle}"

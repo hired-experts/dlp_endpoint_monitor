@@ -18,18 +18,17 @@
         Auto-closes after DurationSeconds, or on the X button in the header (ShowCloseButton, set
         in code-behind) - NOT on a click anywhere on the toast, since that made it impossible to
         select/copy the message or click the ID's Copy button without accidentally dismissing it.
-        AlertBox is used directly (no extra wrapping Border, unlike ModalWindow which needs to
-        unify AlertBox with a footer button below it) - it is already the complete rounded box,
-        and a fixed 360px Width plus a second layer of margin/background was what made this look
-        oversized for a short one-line toast message; MaxWidth + SizeToContent lets it shrink to
-        fit.
+        AlertBox is used directly (no extra wrapping Border) - it is already the complete rounded
+        box, and a fixed 360px Width plus a second layer of margin/background was what made this
+        look oversized for a short one-line toast message; MaxWidth + SizeToContent lets it shrink
+        to fit.
 
         DropShadowEffect: AllowsTransparency="True" windows lose WPF's normal OS-drawn drop
         shadow, and the card's own 1px light-gray BorderBrush alone isn't enough separation when
         the toast floats over a white browser/app window behind it - a white-on-white toast could
-        go unnoticed entirely otherwise. This is set here (not inside AlertBox itself) since
-        Modal's composition needs the shadow around its whole outer card, not around AlertBox's
-        own inner sub-shape - see ModalWindow.xaml's comment.
+        go unnoticed entirely otherwise. This is set here (not inside AlertBox itself) so a window
+        that wraps AlertBox in an outer card could apply its own shadow to that outer shape instead
+        without a duplicate/mismatched shadow on AlertBox's own inner sub-shape.
     -->
     <controls:AlertBox x:Name="Box" Margin="12">
         <controls:AlertBox.Effect>

@@ -72,10 +72,9 @@ public partial class App : Application
             Window window = request.Type switch
             {
                 AlertType.Toast => new ToastWindow(request),
-                AlertType.FullScreen => new FullScreenWindow(request),
-                // Modal, and any future/unmapped AlertType, fails safe to the
-                // must-be-acknowledged window rather than silently not showing anything.
-                _ => new ModalWindow(request),
+                // FullScreen, and any future/unmapped AlertType, fails safe to the hardest-to-miss
+                // window rather than silently not showing anything.
+                _ => new FullScreenWindow(request),
             };
             window.ShowDialog();
         });
