@@ -1,0 +1,24 @@
+<Window x:Class="DlpEndpointMonitor.AlertHost.Windows.FullScreenWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:DlpEndpointMonitor.AlertHost.Controls"
+        Title="DLP Alert"
+        WindowStartupLocation="Manual"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        MouseLeftButtonDown="OnClicked">
+    <!--
+        Covers the entire screen edge-to-edge (explicit Left/Top/Width/Height from
+        SystemParameters.PrimaryScreen* in code-behind, not WindowState=Maximized, which on a
+        WindowStyle=None window sizes to the work area and leaves a taskbar-shaped gap) filled
+        solid with the severity color, with the same rounded AlertBox centered on top in white -
+        one continuous severity color from the screen edge through the header band, breaking to
+        white for the body. Auto-closes after DurationSeconds or on a click anywhere on the
+        backdrop.
+    -->
+    <Grid x:Name="Backdrop">
+        <controls:AlertBox x:Name="Box" Width="520" MaxWidth="720" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    </Grid>
+</Window>

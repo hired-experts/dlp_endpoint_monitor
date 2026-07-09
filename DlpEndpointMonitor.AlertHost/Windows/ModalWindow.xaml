@@ -1,0 +1,48 @@
+<Window x:Class="DlpEndpointMonitor.AlertHost.Windows.ModalWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:DlpEndpointMonitor.AlertHost.Controls"
+        Title="DLP Alert"
+        Width="420"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        Topmost="True">
+    <!--
+        No OS title bar - the AlertBox shape itself is the window content (CRITERIA). Modal does
+        NOT auto-close on a timer; only the Acknowledge button (or an explicit window close)
+        dismisses it, unlike Toast/FullScreen's transient auto-close. Keeps its taskbar entry
+        (ShowInTaskbar left at its default True) since, unlike the other two transient types, it
+        can sit on screen indefinitely until the user acts.
+
+        AlertBox.RoundBottomCorners="False" - Acknowledge sits below AlertBox in this outer card,
+        so only the OUTER Border's bottom corners should be rounded; otherwise AlertBox's own
+        rounded-and-bordered bottom edge shows as a second curved line floating above the button
+        (screenshot-confirmed to look wrong). The DropShadowEffect goes on THIS outer Border (the
+        whole header+message+button card), not inside AlertBox itself, or the shadow would wrap
+        around AlertBox's own bottom edge alone and reintroduce a seam right above the button.
+        A separate full-screen dimming scrim window (see ModalWindow.xaml.cs) sits behind this
+        window for the same white-on-white visibility reason the shadow addresses - Modal is the
+        "must acknowledge" type, so it gets the strongest treatment of the three.
+    -->
+    <Border Margin="12" Background="{DynamicResource SurfaceBrush}" CornerRadius="20">
+        <Border.Effect>
+            <DropShadowEffect Color="Black" Opacity="0.35" BlurRadius="32" ShadowDepth="4" Direction="270"/>
+        </Border.Effect>
+        <StackPanel>
+            <controls:AlertBox x:Name="Box" RoundBottomCorners="False"/>
+            <Button x:Name="AcknowledgeButton"
+                    Style="{DynamicResource AlertButtonStyle}"
+                    Content="Acknowledge"
+                    Click="OnAcknowledgeClick"
+                    HorizontalAlignment="Right"
+                    Margin="12"
+                    Padding="18,8"
+                    BorderThickness="0"
+                    Foreground="{DynamicResource SeverityForegroundBrush}"/>
+        </StackPanel>
+    </Border>
+</Window>

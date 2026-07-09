@@ -1,0 +1,21 @@
+<Application x:Class="DlpEndpointMonitor.AlertHost.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <!--
+        No StartupUri/MainWindow: this app either becomes the session's singleton AlertHost
+        owner (pipe server, driving windows opened on demand by the AlertQueue dispatch loop) or
+        is a one-shot pipe client that hands off its request and exits - startup is driven
+        entirely from App.xaml.cs's OnStartup override. ShutdownMode is explicit because the
+        default OnLastWindowClose would exit the instant the last alert window closes, even
+        though the owner process must keep running to serve the next one.
+    -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Resources/Colors.xaml"/>
+                <ResourceDictionary Source="Resources/Styles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

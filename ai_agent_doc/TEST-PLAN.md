@@ -13,13 +13,22 @@ via the same storage-directory-seam pattern, bringing the total from 78 to 104. 
 coverage) closed the three known gaps found by an independent review of the clipboard
 protection feature (T-CMD-01 extended to cover the 15 clipboard protection commands, the
 handler's independent-enable/reevaluate-count behavior, and the shared AND-formula method
-itself), bringing the total from 104 to 131. Sections 3 and 4
+itself), bringing the total from 104 to 131. Sections 2.12 (`AlertQueue`) and 2.13
+(`RichTextParser`) cover the alert-delivery capability's two pure-logic pieces (see
+`ai_agent_doc/PROJECT.md` section 11) in a separate project,
+`DlpEndpointMonitor.AlertHost.Tests/` (xUnit) - 12 tests, all passing (`dotnet test
+DlpEndpointMonitor.AlertHost.Tests/DlpEndpointMonitor.AlertHost.Tests.csproj`); everything else
+in that capability (the mutex singleton, the named pipe, the actual WPF windows, the
+session-crossing `CreateProcessAsUser` launch) is Win32/UI/session-dependent and covered only
+by section 3.7's manual matrix, same feasibility split as the device-blocking engine below.
+Sections 3 and 4
 remain exactly as originally written for the device-blocking engine - still manual/hardware-only,
 still not attempted; section 3.6 adds the equivalent manual matrix for clipboard content policy
 (also hardware/desktop-session-only, not automatable, per section 1's feasibility table). This
 file is kept as the living reference for what each layer covers and why; section 2's case tables
 now double as a map from test file to case id (each test method/case in
-`DlpEndpointMonitor.Tests/` traces back to a `T-*` id here).
+`DlpEndpointMonitor.Tests/` and `DlpEndpointMonitor.AlertHost.Tests/` traces back to a `T-*` id
+here).
 
 ## 1. Is it possible? - feasibility by layer
 
@@ -43,6 +52,10 @@ remain manual/not implemented. Splitting by how much the Win32 layer gets in the
 | `Actions/BluetoothActions.cs` Win32-calling methods (`RemovePairing`, `EnumerateConnected`) | **No** | Real Bluetooth API, needs a live radio + paired devices. |
 | `Actions/DisplayActions.cs` Win32-calling methods (`DisableExternalDisplays`, `EnableExternalDisplays`, `EnumerateConnected`) | **No** | Real CCD API, needs a live display topology to observe/change. |
 | `Actions/ClipboardActions.cs` | **Partially** | Real Win32 clipboard API, but the clipboard is software-only - no special hardware, works in any interactive Windows session (not typically in a headless CI agent without a desktop session, though). |
+| `DlpEndpointMonitor.AlertHost/AlertQueue.cs` (coalesce/cap dispatch policy) | **Yes** | Pure in-memory queue + policy logic over a caller-supplied `show` callback - no WPF, no pipe, no mutex involved. See 2.12. |
+| `DlpEndpointMonitor.AlertHost/RichTextParser.cs` (closed-tag-allowlist parsing) | **Yes** | Pure regex/string logic producing WPF `Inline` objects from a string - the `Inline`/`Run`/`LineBreak` types are constructible off the UI thread with no live window, so no STA/dispatcher needed to test `Parse()` itself. See 2.13. |
+| `Actions/AlertActions.cs` (`WTSQueryUserToken`/`CreateProcessAsUser` session-crossing launch, pipe connect) | **No** | Needs a real logged-on interactive session, a real token, and a real second session to cross into - none of which exist in a unit test process. See 3.7. |
+| `DlpEndpointMonitor.AlertHost/App.xaml.cs`, `PipeTransport.cs`, `Controls/*`, `Windows/*` (mutex singleton, named pipe server, actual window rendering) | **No** | Real Win32 mutex/pipe objects and real WPF window rendering - session/UI-thread-dependent, same reasoning as `Monitors/*`'s Win32-calling methods above. See 3.7. |
 | **`Monitors/UsbMonitor.cs`, `BluetoothMonitor.cs`, `DisplayMonitor.cs`** - `BlockDevice`, `IsGroupCompliant`, `IsRecordCompliant`, `BlockNonCompliant`, `RestoreCompliant`, `HandleArrival` | **No, as currently structured** | These call `UsbActions`/`BluetoothActions`/`DisplayActions` as `static` methods directly - there is no interface/injection point to substitute a fake. **This is exactly the logic the recent whitelist/blacklist fix changed** - the group-compliance decision, the escalation ladder, the restore-recovery logic. It cannot be unit-tested without either real hardware or a source change (see section 4). |
 | **`Monitors/ClipboardMonitor.cs`, `KeyboardHook.cs`** - `EvaluateAndEnforce`/`ApplyPolicy`, `ShouldBlockPaste` (the copy/cut-clear and paste-swallow enforcement decisions, section 5.10) | **No, same reason** | Same as the row above: these call `ClipboardActions.Read()`/`Clear()` statically with no substitution point, and additionally need a live desktop session/clipboard (not just hardware). The AND-formula and content-scope logic they call into (`ClipboardMonitor.EvaluatePolicy`) is itself pure and IS covered - see 2.9 - only the Win32-calling wrapper around it is not. |
 | `Handlers/Windows/*` | **No, same reason** | Thin wrappers calling straight into `Actions/*` statically. |
@@ -271,6 +284,34 @@ was exercised, in `ClipboardRuleListTests.cs`'s `AndFormula_*` tests).
 | T-CLIP-POLICY-06 | Both lists disabled | `Violates == false` regardless of content |
 | T-CLIP-POLICY-07 | A `Text`-scoped blacklist rule evaluated against a `Files`-kind call with the same matching string, and vice versa | Kind isolation holds at the `EvaluatePolicy` level, not just inside `ClipboardRuleList.FindMatch` |
 
+### 2.12 Alert queueing policy (`DlpEndpointMonitor.AlertHost/AlertQueue.cs`)
+
+`DlpEndpointMonitor.AlertHost.Tests/AlertQueueTests.cs`. No WPF, pipe, or mutex involved - the
+`show` callback is a plain delegate the test supplies, blocked/released via `SemaphoreSlim` so
+the coalesce/cap timing is deterministic instead of racy.
+
+| # | Case | Expected |
+|---|---|---|
+| T-AQ-01 | A second and third request sharing `(Type, Severity)` arrive while an entry for that same key is still pending (not yet dequeued for display) | Both fold into the pending entry's count instead of opening their own window; the count is appended to the title as `" (+N more)"` once shown; a different `(Type, Severity)` key never coalesces regardless of enqueue order |
+| T-AQ-02 | 7 distinct-key requests: 1 currently showing, 5 filling the pending cap, 1 more beyond it | The 7th (`MaxPending` = 5 already full) is dropped, not queued; the drop is logged to `Console.Error` (message contains the dropped alert's title and the word "dropped") - CRITERIA's "no silent caps" |
+
+### 2.13 Rich-text tag parsing (`DlpEndpointMonitor.AlertHost/RichTextParser.cs`)
+
+`DlpEndpointMonitor.AlertHost.Tests/RichTextParserTests.cs`. Covers `Parse()` only -
+`Apply()` (populating a live `TextBlock`) needs an STA thread/UI-hosting and is out of scope
+per section 1's feasibility table; `Parse()` is what `Apply` thinly wraps, so it is fully
+covered.
+
+| # | Case | Expected |
+|---|---|---|
+| T-RTP-01/02 | `<strong>bold</strong>` and `<b>bold</b>` | Single bold `Run`, `FontWeight == Bold` |
+| T-RTP-03/04 | `<em>slanted</em>` and `<i>slanted</i>` | Single italic `Run`, `FontStyle == Italic` |
+| T-RTP-05 | `"line1<br>line2"` | Three inlines: plain `Run("line1")`, `LineBreak`, plain `Run("line2")` |
+| T-RTP-06 | `<STRONG>bold</STRONG>` (uppercase) | Same bold `Run` result as T-RTP-01 - tag matching is case-insensitive |
+| T-RTP-07 | `<script>alert('x')</script>plain` (a tag outside the closed allowlist) | Never throws; the unrecognized tag is stripped, and the surrounding text (`alert('x')plain`) still renders as plain, non-bold text |
+| T-RTP-08 | `<strong>bold with no closing tag` (unbalanced markup) | Never throws - the parser has no "invalid" concept, it just applies formatting state through to the end of the string |
+| T-RTP-09 | `null` and `""` input | Returns an empty, non-null inline list rather than throwing |
+
 ---
 
 ## 3. Test cases - the enforcement/decision logic (needs real hardware, or a seam - section 4)
@@ -353,6 +394,28 @@ in section 1's feasibility table.
 | M-CLIP-04 (paste interception) | Blacklist enabled with a pattern currently sitting on the clipboard (e.g. copied via `clipboard_set` command or by another app, bypassing this process's own copy-time clearing) | Focus a text field in any application and press Ctrl+V | The target application receives **nothing** (no text appears); `clipboard_content_blocked` (`Operation: "paste"`) fires; the existing `keyboard_shortcut` (`action: "paste"`) event still fires too. Then clear the blacklist and press Ctrl+V again with compliant content on the clipboard | The paste succeeds normally and the target application receives the content, confirming the swallow is verdict-specific, not a permanent block on all paste |
 | M-CLIP-05 (Image/Unknown always pass through) | Blacklist enabled with a pattern that would match "anything" (e.g. `.*`, `Kind: null`) | Copy an image (e.g. a screenshot via Print Screen) to the clipboard, then paste it | `clipboard_change` (`ClipboardImageEvent`) fires, no `clipboard_content_blocked` ever follows for the copy or the paste, and the image pastes successfully regardless of how broad the blacklist pattern is - confirms Image/Unknown content is never evaluated against these rules at all (section 5.10's content-scope limitation) |
 
+### 3.7 Alert Host delivery mechanism (`Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/`, `ai_agent_doc/PROJECT.md` section 11)
+
+Requires a real interactive Windows session (WPF windows, a real named pipe, a real named
+mutex) and, for the session-crossing rows, a genuine second session - none of this is
+reachable from a headless CI agent or a unit test process, same reasoning as section 3's
+device-blocking rows. This capability is **not wired into any block path yet** (PROJECT.md
+section 11.8), so there is no policy-violation trigger to exercise here - call
+`AlertActions.ShowAlert(...)` directly (e.g. a throwaway debug call, or a small manual harness)
+to drive each row.
+
+| # | Setup | Action | Expected |
+|---|---|---|---|
+| M-ALERT-01 (visual shape, all three types) | None | Call `ShowAlert` once for each of `Modal`/`Toast`/`FullScreen`, each severity | Each shows the same rounded 20px-corner-radius box with a colored header band (Info blue `#1B7FA9`, Warning amber `#EB980A`, Blocked red `#EE3A3A`) and a white body; `FullScreen` additionally fills the entire screen edge-to-edge with the severity color as backdrop |
+| M-ALERT-02 (Modal requires acknowledgment) | `ShowAlert` with `Type: Modal` | Wait past `DurationSeconds` without clicking anything | Window stays open (Modal never auto-closes); clicking Acknowledge/OK closes it |
+| M-ALERT-03 (Toast/FullScreen auto-close + click-dismiss) | `ShowAlert` with `Type: Toast` (and separately `FullScreen`) | (a) wait `DurationSeconds`, (b) on a fresh alert, click the window instead | Both (a) and (b) close the window; it does not require a specific button, any click dismisses it |
+| M-ALERT-04 (rich text rendering) | `ShowAlert` with `Message: "Plain <strong>bold</strong> and <em>italic</em><br>new line"` | Observe the rendered body | Bold/italic/line-break render correctly; no literal `<strong>` tag text is visible |
+| M-ALERT-05 (singleton mutex - same session) | Two terminals in the same interactive session | Run `AlertActions.ShowAlert`-equivalent twice in quick succession (or launch `AlertHost.exe` directly twice) | Only one visible window queue exists; the second invocation's alert either coalesces (same Type/Severity) or queues behind the first - never two independent windows/processes both trying to own the pipe |
+| M-ALERT-06 (coalesce/cap visible end-to-end) | One AlertHost owner already showing an alert | Fire several more alerts of the same `(Type, Severity)` while it's showing, then more than 5 distinct-key alerts | Same-key ones fold into one window with `" (+N more)"` in the title; beyond the 5-pending cap, extra distinct-key alerts never appear and a drop line appears in `AlertHost`'s stderr |
+| M-ALERT-07 (same-session direct launch) | This binary run interactively (not as a service) | Call `ShowAlert` | `Process.GetCurrentProcess().SessionId == WTSGetActiveConsoleSessionId()` is true, so the fast `Process.Start` path is taken - confirm via a debug log/breakpoint that `LaunchIntoSession` is never reached |
+| M-ALERT-08 (real session-crossing launch - the one path that most needs live verification) | This binary genuinely running as the `LocalSystem` service in Session 0 (per the sibling `dlp_v2/agent`'s actual packaging), a real user logged into the console | Call `ShowAlert` | `WTSQueryUserToken`/`DuplicateTokenEx`/`CreateEnvironmentBlock`/`CreateProcessAsUser` all succeed, and the alert window actually appears on the logged-on user's desktop - this is the scenario the `winsta0\\default` `lpDesktop` setting exists for; if it's ever omitted or wrong, this is the row that silently fails (process starts, no visible window, no error) |
+| M-ALERT-09 (no interactive session at all) | LocalSystem service running at the lock screen / before any user has logged in | Call `ShowAlert` | `WTSGetActiveConsoleSessionId()` returns `0xFFFFFFFF` (no console session) or `WTSQueryUserToken` fails - confirm `ShowAlert` returns `(false, "<reason>")` and does not throw or hang |
+
 ---
 
 ## 4. If you later want automated coverage of section 3 - what a seam would look like
@@ -387,5 +450,11 @@ discussion, not something to fold into "just add tests."
 5. Section 3.6's clipboard manual matrix - likewise still to run by hand; the enforcement
    decision logic it exercises (`ClipboardMonitor`/`KeyboardHook`) is Win32/desktop-session-only,
    same as the rest of section 3.
-6. Section 4's seam - still not attempted; only worth it if ongoing regression risk in the
+6. ~~Section 2.12/2.13's AlertQueue/RichTextParser cases~~ - **done**:
+   `DlpEndpointMonitor.AlertHost.Tests/`, 12 passing tests.
+7. Section 3.7's Alert Host manual matrix - still to run by hand, in particular M-ALERT-08 (the
+   real `CreateProcessAsUser` session-crossing launch against the actual `LocalSystem`/Session-0
+   deployment) - this is the one row here with no substitute for testing against real hardware
+   and a real second session.
+8. Section 4's seam - still not attempted; only worth it if ongoing regression risk in the
    enforcement core justifies the refactor cost.

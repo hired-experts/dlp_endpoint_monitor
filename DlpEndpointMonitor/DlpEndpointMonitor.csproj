@@ -13,4 +13,8 @@
 	<PublishTrimmed>true</PublishTrimmed>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\DlpEndpointMonitor.AlertContracts\DlpEndpointMonitor.AlertContracts.csproj" />
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,107 @@
+<UserControl x:Class="DlpEndpointMonitor.AlertHost.Controls.AlertBox"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+        The one shape shared by all three alert window types (Modal/Toast/FullScreen): a rounded
+        box with a colored header band on top (Severity color, white text) and a plain white
+        body below (Message) - the two window types differ only in size/placement/backdrop
+        around this control, never in this content shape, per CRITERIA.
+
+        NOTE: ClipToBounds does NOT clip a child to the outer Border's rounded CornerRadius shape
+        in WPF - it only clips to a plain rectangle. A Border's own Background does follow its
+        CornerRadius automatically, but an opaque child (HeaderBorder's colored background) does
+        not inherit that shape and paints straight square corners over it unless it is given a
+        matching CornerRadius of its own - that was the actual bug (square top corners visible in
+        the header band, screenshot-confirmed) even with ClipToBounds set. The fix is
+        HeaderBorder's own CornerRadius below, not a clip trick.
+    -->
+    <Border x:Name="RootBorder"
+            Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
+            BorderThickness="1"
+            CornerRadius="20"
+            SnapsToDevicePixels="True"
+            MouseLeftButtonDown="OnBoxMouseLeftButtonDown">
+        <!--
+            MouseLeftButtonDown is handled (not just observed) at this level so an ordinary click
+            anywhere on the card's own content - selecting/copying the message, clicking the ID's
+            Copy button - never bubbles up to ToastWindow/FullScreenWindow's window-level
+            click-to-dismiss handler. Click-to-dismiss still works on the backdrop AROUND this
+            box (that handler lives on the window/backdrop element, outside this control, and
+            never sees a click that originated in here once this marks it handled). This does not
+            interfere with CopyButton's own Click event below - a Button marks its own click
+            handled internally before this handler would ever run for it.
+        -->
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Matches the outer Border's own top corners exactly; square on the bottom two
+                 since the plain-white message body follows directly below with no visible seam
+                 (same white background as the outer Border, so any radius mismatch there is
+                 invisible regardless). -->
+            <Border x:Name="HeaderBorder" Grid.Row="0" CornerRadius="20,20,0,0" Padding="24,18">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="TitleText" Grid.Column="0" FontSize="18" FontWeight="SemiBold"
+                               TextWrapping="Wrap" VerticalAlignment="Center"/>
+                    <!-- Opt-in per window type via ShowCloseButton (only ToastWindow enables this
+                         today - Modal has its own Acknowledge button, FullScreen keeps its
+                         click-the-backdrop-to-dismiss behavior) - collapsed by default so it
+                         reserves no layout space unless a window explicitly asks for it. -->
+                    <Button x:Name="CloseButton"
+                            Grid.Column="1"
+                            Style="{DynamicResource AlertButtonStyle}"
+                            Content="&#x2715;"
+                            Click="OnCloseClick"
+                            Visibility="Collapsed"
+                            Margin="12,0,-8,0"
+                            Padding="8,2"
+                            FontSize="12"
+                            BorderThickness="0"
+                            Background="#22FFFFFF"
+                            Foreground="{DynamicResource SeverityForegroundBrush}"
+                            VerticalAlignment="Top"/>
+                </Grid>
+            </Border>
+
+            <TextBlock x:Name="MessageText"
+                       Grid.Row="1"
+                       Margin="24,18"
+                       FontSize="14"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource BodyTextBrush}"/>
+
+            <!-- Only shown when AlertRequest.Id is supplied (Id is caller-provided, correlates to
+                 a real event elsewhere in the system - never fabricated here, see AlertBox.xaml.cs).
+                 TextBlock has no built-in text-selection in WPF, so a one-click Copy button is the
+                 reliable way to get the ID onto the clipboard rather than relying on click-drag
+                 selection. -->
+            <StackPanel x:Name="IdRow" Grid.Row="2" Orientation="Horizontal"
+                        Margin="24,0,24,18" Visibility="Collapsed">
+                <TextBlock x:Name="IdText"
+                           FontSize="11"
+                           FontFamily="Consolas"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource MutedForegroundBrush}"/>
+                <Button x:Name="CopyButton"
+                        Style="{DynamicResource AlertButtonStyle}"
+                        Content="Copy"
+                        Click="OnCopyClick"
+                        Margin="10,0,0,0"
+                        Padding="10,3"
+                        FontSize="11"
+                        BorderThickness="1"
+                        BorderBrush="{DynamicResource BorderBrush}"
+                        Background="{DynamicResource SurfaceBrush}"
+                        Foreground="{DynamicResource BodyTextBrush}"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</UserControl>

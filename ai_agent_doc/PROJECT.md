@@ -1074,7 +1074,192 @@ lines look the way they do, so a future change does not accidentally reintroduce
 
 ---
 
-## 11. Where to look for the truth
+## 11. Alert Host architecture (standalone capability, not yet wired into any block path)
+
+**NOT YET WIRED INTO ANY BLOCK PATH.** Everything in this section is a standalone, callable,
+independently-testable capability - `Actions/AlertActions.ShowAlert(...)` exists and works, but
+no `Monitors/*` (`ClipboardMonitor`, `UsbMonitor`, `BluetoothMonitor`, `DisplayMonitor`,
+`NetworkMonitor`) calls it yet. Wiring a block/violation event to actually pop an alert is
+deliberately left as a follow-up, separate change - this section documents the delivery
+*mechanism* only.
+
+### 11.1 Why a second process is required (Session 0 isolation)
+
+This binary is designed to run as a Windows service under `LocalSystem`, in Session 0 (see the
+sibling `dlp_v2/agent` repo's packaging - `Account="LocalSystem"` in its WiX product definition
+- for how it is actually deployed; nothing in *this* repo changes that deployment). Session 0 is
+a non-interactive session with no desktop - a WPF `Window` created there is never visible to
+anyone, no matter how correctly it is coded. The only way to show a window to the logged-on user
+is a **separate process running in that user's own interactive session**. That process is
+`DlpEndpointMonitor.AlertHost.exe` (`DlpEndpointMonitor.AlertHost/`, a `net10.0-windows` WPF app),
+and `Actions/AlertActions.cs` is the one place the main binary knows how to reach it - it never
+touches WPF, System.Windows, or any UI type itself, keeping the shipped binary's trimmed,
+`win-x64`, zero-WPF-dependency build exactly as it was (its only new reference is
+`DlpEndpointMonitor.AlertContracts`, which is plain records/enums, not WPF).
+
+### 11.2 Delivery mechanism: mutex-guarded singleton owning a named pipe
+
+`AlertHost.exe` may be launched many times over a machine's uptime (once per alert, in the
+naive case) but at most one instance per interactive session may ever own a visible window
+queue - otherwise two alerts could show at once, or two instances could race to answer the same
+request. Ownership is decided by a **session-scoped named `Mutex`**,
+`"DlpEndpointMonitor.AlertHost.Singleton"` (deliberately no `"Global\"` prefix: a `Global\` mutex
+is one instance for the *whole machine*; this needs one owner *per session*, since a machine can
+have multiple interactive sessions - fast user switching, RDP - each needing its own alert
+delivery). `App.OnStartup` (`AlertHost/App.xaml.cs`) creates the mutex with
+`initiallyOwned: true`:
+
+- If `createdNew` is true, this instance **is** the owner: it starts an `AlertQueue`
+  (section 11.3) and a `PipeTransport.Server` (`AlertHost/PipeTransport.cs`) listening on a
+  named pipe, `NamedPipeServerStream`, whose name is `AlertPipe.Name` - a single constant
+  defined once in `DlpEndpointMonitor.AlertContracts/AlertPipe.cs` and referenced by both sides,
+  never hand-typed as a literal in more than one place.
+- If `createdNew` is false, an owner already exists: this instance is a **one-shot client** -
+  it opens a `NamedPipeClientStream` to `AlertPipe.Name`, writes exactly one newline-terminated
+  JSON `AlertRequest` line (mirroring the newline-delimited-JSON convention this repo already
+  uses between the main binary and its stdin/stdout), and exits immediately via `Shutdown(0)`.
+
+The owner's `PipeTransport.Server` runs an accept loop that reads newline-delimited JSON lines
+from whichever client is currently connected and forwards each parsed `AlertRequest` into the
+owner's `AlertQueue.Enqueue(...)`. A malformed line, or a client disconnecting mid-read, is
+logged and does not take down the accept loop - the same "one bad input must not kill the
+monitor thread" discipline this repo already applies elsewhere (section 8's error rules).
+
+**Bootstrapping the very first alert** in a session needs care: launching a brand-new
+`AlertHost.exe` and immediately trying to pipe-connect to it is a race (the new process has not
+created its pipe server yet). Instead, `AlertActions.ShowAlert` encodes that first
+`AlertRequest` as base64 JSON and passes it as a `--initial-alert=<base64>` command-line
+argument; the new instance decodes it in `App.OnStartup` and enqueues it the moment it wins the
+mutex, with no reconnect race at all. It still starts its own pipe server afterward for any
+further requests that arrive during its lifetime.
+
+### 11.3 Session-crossing launch (`Actions/AlertActions.cs`)
+
+`ShowAlert(AlertRequest)` first tries the pipe (`TrySendToRunningOwner`, a client-only,
+minimal re-implementation of the same newline-JSON protocol - it cannot literally share code
+with `AlertHost.PipeTransport` because `AlertContracts`, the one project both sides may
+reference, is deliberately kept dependency-free, and the main binary must not take a project
+reference on a WPF app just to reuse a few lines of pipe-client code). If nobody answers within
+a short timeout, it launches a new `AlertHost.exe`:
+
+- **Same session** (the common case in manual/dev testing, where this binary is not actually
+  running as a service): `Process.GetCurrentProcess().SessionId` already equals
+  `WTSGetActiveConsoleSessionId()`, so a plain `Process.Start` is enough - no token work needed.
+- **Different session** (the real deployment - `LocalSystem` in Session 0, interactive user in
+  another session): `WTSQueryUserToken` gets that session's user token, `DuplicateTokenEx`
+  turns it into a primary token suitable for `CreateProcessAsUser`, `CreateEnvironmentBlock`
+  builds that user's environment block, and `CreateProcessAsUser` launches the exe with
+  `STARTUPINFO.lpDesktop` set to `"winsta0\\default"` - omitting that last part is *the* classic
+  way this exact pattern silently fails (the process starts, but on a non-interactive window
+  station, so its window is never seen - no exception, no error code). Every handle acquired
+  along the way (`userToken`, `primaryToken`, `environment`, `procInfo.hProcess`/`hThread`) is
+  released in a `finally` block regardless of which step failed. Every failure path returns
+  `(false, "<reason>")`, matching every other `Actions/*` method in this codebase - nothing here
+  throws for an expected Win32 failure (no one logged in yet at boot, a duplicated token
+  rejected, `CreateProcessAsUser` itself failing).
+
+### 11.4 Queueing policy (`AlertHost/AlertQueue.cs`)
+
+The owner's `AlertQueue` is a single in-memory producer/consumer (a lock-protected queue +
+`SemaphoreSlim`, not literally `System.Threading.Channels.Channel<T>`, so the coalesce lookup
+below has somewhere to live) with one dispatcher loop that shows at most one alert window at a
+time, applying two policies as requests are enqueued:
+
+- **COALESCE** - while an entry for the same `(Type, Severity)` pair is still pending (enqueued
+  but not yet dequeued for display), a new request with that same pair does not open a second
+  window; it increments a running count on the existing pending entry, folded into the shown
+  message's title as `" (+N more)"` once it is finally displayed. A request that arrives *after*
+  the matching entry has already been dequeued for display starts a fresh pending entry instead
+  of trying to fold into a window already on screen.
+- **CAP** - at most 5 distinct-key pending entries are held at once; anything beyond that is
+  dropped, not silently - the drop is logged to `Console.Error` (`AlertHost` has no
+  `EventEmitter`; it is a separate process/project) so a dropped alert is never invisible.
+
+The dispatcher loop calls its `show` callback synchronously and blocks until the callback
+returns - `App.ShowAlertWindow` hops onto the WPF dispatcher thread via `Dispatcher.Invoke` (not
+`InvokeAsync`/`BeginInvoke`, specifically so the call blocks) and calls `Window.ShowDialog()`,
+which itself blocks until the window is dismissed (Modal: acknowledged; Toast/FullScreen: timer
+elapsed or clicked). That is the entire mechanism behind "never two windows visible at once" -
+no separate visibility-tracking state is needed.
+
+### 11.5 Visual design and where the color palette came from
+
+All three `AlertType` values (`Modal`, `Toast`, `FullScreen`) share one visual shape - a single
+reusable control, `AlertHost/Controls/AlertBox.xaml(.cs)` - a rounded box (20px corner radius)
+with a colored header band across the top (`Title`, white foreground) and a plain white body
+below (`Message`, run through `RichTextParser`, section 11.6). They differ only in size,
+placement, and backdrop:
+
+- **Modal** - small/medium window, centered on the primary screen, custom chrome (no OS title
+  bar) using the `AlertBox` directly as the window content. Does **not** auto-close on a timer -
+  it requires an explicit Acknowledge/OK click, since this is the "user must acknowledge" type.
+  Keeps a taskbar entry (unlike Toast/FullScreen) since it persists until dismissed, not
+  transient.
+- **Toast** - small window anchored to the bottom-right screen corner (common OS toast
+  convention), auto-closes after `DurationSeconds` (default 5) or on a click anywhere on it.
+  `ShowInTaskbar="False"` - transient, should not clutter the taskbar.
+- **FullScreen** - covers the entire screen edge-to-edge, filled solid with the severity color as
+  the backdrop, with the same rounded `AlertBox` centered on top in white, so the visual reads as
+  one continuous severity color from the screen edge through the header band, breaking to white
+  only for the body. Auto-closes the same way as Toast. `ShowInTaskbar="False"`.
+
+All three are `Topmost="True"` - the entire point of an alert is that it is not hidden behind
+another window.
+
+Severity maps to color (`AlertHost/Resources/Colors.xaml`, consumed everywhere through
+`Controls/SeverityBrushes.cs` so there is exactly one place mapping `AlertSeverity` to a brush):
+`Info` -> `#FF1B7FA9` (brand blue), `Warning` -> `#FFEB980A` (amber), `Blocked` -> `#FFEE3A3A`
+(red), all with a white (`#FFFFFFFF`) header foreground. Surface/background/body tokens
+(`#FFFFFFFF` card white, `#FFF4F7F8` page background, `#FF151B1F` body text, `#FFDAE2E5` border)
+round out the palette. **These exact hex values were computed directly from the sibling
+`dlp_v2/controlcenter` web dashboard's HSL design tokens
+(`dlp_v2/controlcenter/app/globals.css`)** - they are not this project's own invention, and
+should not be recomputed or approximated differently if the dashboard's tokens ever change;
+re-derive from that file, the same way these were.
+
+### 11.6 Rich text in `Message` (`AlertHost/RichTextParser.cs`)
+
+`AlertRequest.Message` stays a plain string on the wire (no HTML type in `AlertContracts`), but
+may contain a small, **closed** allowlist of inline tags: `<strong>`/`<b>` (bold), `<em>`/`<i>`
+(italic), `<br>` (line break) - case-insensitive. `RichTextParser.Parse` converts such a string
+into a sequence of WPF `Inline` objects (`Run` with `FontWeight`/`FontStyle` set, or
+`LineBreak`) for a `TextBlock.Inlines` collection. This is deliberately **not** a general HTML
+parser - no XML/HTML parsing library, no WPF `WebBrowser` control - and it must **never throw**:
+any tag outside the allowlist is silently stripped (the surrounding text still renders as plain
+text), and an unclosed/malformed tag simply never matches the tag regex and falls through as
+plain text rather than being treated as an error. A top-level `try/catch` around the whole parse
+is a last-resort fallback to one plain-text `Run` of the original message, in case something
+still misbehaves on a truly pathological input.
+
+### 11.7 Contracts (`DlpEndpointMonitor.AlertContracts/`)
+
+Referenced by both the main binary and `AlertHost`, and deliberately kept to plain
+records/enums + one `System.Text.Json` source-gen `JsonSerializerContext`
+(`AlertJsonContext.cs`) - the same reasoning already documented in section 7/`SchemaExporter`'s
+one deliberate reflection exception applies here: introducing a second reflection-based JSON
+path anywhere in this dependency chain would compromise the main binary's trimmed,
+self-contained build. `AlertRequest(Type, Title, Message, Id, Severity = Info, DurationSeconds = 5)` -
+`Id` is a required correlation field for every alert type (Modal, Toast, FullScreen), not
+optional; both `AlertActions.ShowAlert` and `AlertHost.AlertQueue.Enqueue` reject a
+null/blank `Id` rather than showing an uncorrelatable alert, since a JSON-deserialized request
+can carry a blank string despite the compile-time non-nullable signature.
+`AlertType { Modal, Toast, FullScreen }`, `AlertSeverity { Info, Warning, Blocked }`,
+`AlertPipe.Name` (the one shared pipe-name constant, section 11.2).
+
+### 11.8 What is deliberately out of scope here
+
+- **Wiring `ShowAlert` into any block path** - no `Monitors/*` calls it yet; this is a
+  standalone capability today, wiring is an explicit follow-up.
+- **An installer/packaging entry for `AlertHost.exe`** - that belongs in the sibling `dlp_v2`
+  repo's own packaging, same as this binary's own service registration (section 10's "No
+  packaging/installer" entry already covers this binary; `AlertHost.exe` inherits the same gap).
+- **A persisted/DB-backed alert history** - `AlertQueue` is purely in-memory, owned entirely by
+  the current session's owner process; nothing about a shown or dropped alert survives that
+  process exiting.
+
+---
+
+## 12. Where to look for the truth
 
 | To answer... | Open this file |
 |---|---|
@@ -1095,4 +1280,5 @@ lines look the way they do, so a future change does not accidentally reintroduce
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | Persisted state file format/location | `Core/UsbDeviceList.cs`, `Core/DisabledDevices.cs` |
+| The Alert Host delivery mechanism (session-crossing launch, mutex/pipe singleton, queueing, visual design) | section 11, `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/` |
 | The short operating guide | `ai_agent_doc/AGENTS.md` |

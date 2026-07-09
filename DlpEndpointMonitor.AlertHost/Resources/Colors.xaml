@@ -1,0 +1,26 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+        Severity colors - taken verbatim from the control center's HSL design tokens
+        (dlp_v2/controlcenter/app/globals.css), already converted to hex by CRITERIA. Do not
+        recompute or approximate these; both AlertBox's header band and FullScreenWindow's
+        solid backdrop resolve through Controls/SeverityBrushes.cs so there is exactly one
+        place mapping AlertSeverity to a brush.
+    -->
+    <SolidColorBrush x:Key="InfoBrush" Color="#FF1B7FA9"/>
+    <SolidColorBrush x:Key="WarningBrush" Color="#FFEB980A"/>
+    <SolidColorBrush x:Key="BlockedBrush" Color="#FFEE3A3A"/>
+
+    <!-- All three severities use white header text over their color band. -->
+    <SolidColorBrush x:Key="SeverityForegroundBrush" Color="#FFFFFFFF"/>
+
+    <!-- Shared surface/background/body tokens, also from the same design-token source. -->
+    <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="PageBackgroundBrush" Color="#FFF4F7F8"/>
+    <SolidColorBrush x:Key="BodyTextBrush" Color="#FF151B1F"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#FFDAE2E5"/>
+    <!-- muted foreground token (200 15% 50% HSL) - for secondary/de-emphasized text (e.g. the event ID row). -->
+    <SolidColorBrush x:Key="MutedForegroundBrush" Color="#FF6C8693"/>
+
+</ResourceDictionary>

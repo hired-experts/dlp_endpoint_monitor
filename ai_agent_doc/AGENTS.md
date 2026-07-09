@@ -62,11 +62,16 @@ the wire format additive and stable (see "No invention" rules in section 9).
 
 ## 3. Folder layout
 
-Two projects. `DlpEndpointMonitor/DlpEndpointMonitor.csproj` is the shipped binary: target
+Five projects. `DlpEndpointMonitor/DlpEndpointMonitor.csproj` is the shipped binary: target
 `net10.0`, built as a trimmed, single-file, self-contained `win-x64` executable (no runtime
-dependency on a shared .NET install), zero NuGet dependencies. `DlpEndpointMonitor.Tests/`
-is a dev-only xUnit test project (the only place a NuGet dependency exists in this repo) -
-see section 8.1 and `ai_agent_doc/TEST-PLAN.md`.
+dependency on a shared .NET install), zero NuGet dependencies (its one `ProjectReference`,
+`DlpEndpointMonitor.AlertContracts`, is itself dependency-free plain records/enums, so this
+does not compromise the trim/self-contained build). `DlpEndpointMonitor.Tests/` is a dev-only
+xUnit test project (a NuGet dependency exists here, and in `DlpEndpointMonitor.AlertHost.Tests/`
+- see section 8.1 and `ai_agent_doc/TEST-PLAN.md`. `DlpEndpointMonitor.AlertContracts/` and
+`DlpEndpointMonitor.AlertHost/` are a standalone, currently-unwired alert-delivery capability -
+see section 10's "Alert delivery" entry and `ai_agent_doc/PROJECT.md` section 11 for why a
+second process exists and how it talks to the first.
 
 ```
 DlpEndpointMonitor/
@@ -114,6 +119,11 @@ DlpEndpointMonitor/
                               resolution (FindInstanceIdByMac), path/CoD parsing
     DisplayActions.cs         QueryDisplayConfig/SetDisplayConfig(Paths) topology juggling
     ClipboardActions.cs       OpenClipboard/GetClipboardData/SetClipboardData
+    AlertActions.cs           ShowAlert(AlertRequest): the one stateless entry point that shows
+                              a UI alert - launches/reaches DlpEndpointMonitor.AlertHost.exe in
+                              the interactive session (same-session Process.Start, or
+                              WTSQueryUserToken+CreateProcessAsUser cross-session); NOT called
+                              from any Monitors/* yet, see section 10
   Handlers/
     IHandlers.cs              one interface per command family (IClipboardHandler, IUsbStorageHandler,
                               IUsbDeviceHandler, IUsbProtectionHandler, IClipboardProtectionHandler,
@@ -132,6 +142,35 @@ DlpEndpointMonitor.Tests/    xUnit project (ProjectReference to the binary above
                              SchemaExporterTests.cs. Covers the hardware-independent pure-logic
                              layer only - see ai_agent_doc/TEST-PLAN.md section 1 for what is and is not
                              unit-testable and why.
+DlpEndpointMonitor.AlertContracts/   plain net10.0 class library (no -windows TFM, no WPF/Win32
+                             dependency), referenced by BOTH the main binary and AlertHost so
+                             their wire format cannot drift. Deliberately dependency-free -
+                             AlertRequest.cs/AlertType.cs/AlertSeverity.cs (plain records/enums),
+                             AlertPipe.cs (the one shared `AlertPipe.Name` pipe-name constant),
+                             AlertJsonContext.cs (System.Text.Json source-gen context - zero
+                             reflection, same reasoning as AppJsonContext.cs/CommandsJsonContext.cs).
+DlpEndpointMonitor.AlertHost/   companion WPF app (net10.0-windows, OutputType WinExe), NOT
+                             started by DlpEndpointMonitor.csproj's own build/publish - it is a
+                             separate deployable exe, launched on demand by
+                             Actions/AlertActions.cs. Shows a Modal/Toast/FullScreen alert window
+                             in the interactive user's session (this binary itself may be running
+                             headless in Session 0). App.xaml.cs (mutex-guarded singleton
+                             startup, --initial-alert arg parsing), AlertQueue.cs (coalesce/cap
+                             dispatch), PipeTransport.cs (newline-JSON named-pipe server/client),
+                             RichTextParser.cs (the closed `<strong>/<b>/<em>/<i>/<br>` inline-tag
+                             allowlist), Resources/Colors.xaml (severity/surface brushes),
+                             Controls/AlertBox.xaml(.cs) (the one shared rounded-box+header-band
+                             control), Windows/ModalWindow|ToastWindow|FullScreenWindow.xaml(.cs).
+                             See ai_agent_doc/PROJECT.md section 11 for the full delivery-mechanism
+                             design (why a second process, mutex/pipe singleton, session-crossing
+                             launch, queueing policy, visual design, color-token provenance) and
+                             its explicit NOT YET WIRED note.
+DlpEndpointMonitor.AlertHost.Tests/   xUnit project (net10.0-windows, so it can reference
+                             AlertHost's classes), AlertQueueTests.cs + RichTextParserTests.cs -
+                             the two pure-logic pieces only. Does not and cannot cover the WPF
+                             windows, the named pipe, the mutex, or CreateProcessAsUser - see
+                             ai_agent_doc/TEST-PLAN.md sections 2.12/2.13 and its manual-test-matrix
+                             entry for those.
 ```
 
 **Import rule:** there are no path aliases here (single project) - just use normal C#
@@ -478,6 +517,37 @@ what is and is not covered and why.
   opposite of `IsProtectedInternal`/`IsRemovable`'s fail-**closed** defaults in device blocking
   (section 10's other entries, PROJECT.md section 5.1) - do not port that fail-closed instinct
   onto the paste path, or a bad regex from an operator can brick paste system-wide.
+- **Showing a UI alert from this binary always requires crossing into a different Windows
+  session, and `STARTUPINFO.lpDesktop` is the easy way to get that silently wrong.** This
+  binary may run as a LocalSystem service in Session 0, which has no desktop at all - a WPF
+  window can only ever be shown by a separate process, `DlpEndpointMonitor.AlertHost.exe`,
+  running in the interactive user's own session. `Actions/AlertActions.cs` gets there via
+  `WTSQueryUserToken` (get that session's user token) -> `DuplicateTokenEx` (impersonation ->
+  primary token) -> `CreateEnvironmentBlock` -> `CreateProcessAsUser`. The single most common
+  real-world way to get this pattern wrong is forgetting to set
+  `STARTUPINFO.lpDesktop = "winsta0\\default"` before the `CreateProcessAsUser` call - without
+  it, the new process is created on a non-interactive window station and its window is simply
+  never visible to anyone, with no exception and no error code to explain why. Every handle
+  this path acquires (`userToken`, `primaryToken`, `environment`, `procInfo.hProcess`/
+  `hThread`) is closed in a `finally` block regardless of which step failed - do not add a new
+  early return that skips that cleanup. If the current process already lives in the target
+  interactive session (e.g. manual/dev testing, not the real service deployment), none of this
+  session-crossing machinery runs at all - `ShowAlert` checks
+  `Process.GetCurrentProcess().SessionId == WTSGetActiveConsoleSessionId()` first and just
+  calls `Process.Start` directly.
+- **Only one AlertHost.exe may own the alert-delivery pipe per interactive session, and that
+  ownership is decided by a session-scoped named `Mutex`, not by any process-tracking in this
+  binary.** `AlertHost.App.OnStartup` tries to create `"DlpEndpointMonitor.AlertHost.Singleton"`
+  (deliberately no `"Global\"` prefix - each session must get its own owner, since this app runs
+  once per logged-in user, not once per machine); whichever instance wins hosts the named pipe
+  server (`AlertPipe.Name`, defined exactly once in `AlertContracts` and never hand-typed
+  elsewhere) and the in-memory `AlertQueue`, and every later invocation in that session detects
+  the mutex is already held, writes its `AlertRequest` as one newline-terminated JSON line to
+  the pipe, and exits immediately - it never starts a second server. The very first alert in a
+  session is passed to the winning instance as a base64 `--initial-alert=` argument rather than
+  relying on a connect-after-launch race, since the new process becoming the owner and starting
+  its pipe server is not instantaneous. See `ai_agent_doc/PROJECT.md` section 11 for the full
+  queueing/coalesce/cap policy this feeds into.
 
 ---
 
@@ -499,6 +569,7 @@ what is and is not covered and why.
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
+| How a UI alert reaches the interactive session, and why | `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/App.xaml.cs`, `ai_agent_doc/PROJECT.md` section 11 |
 | Deep design, protocol tables, principles, roadmap | `ai_agent_doc/PROJECT.md` |
 | The validation gate to run before a commit | AGENTS.md section 8.1 |
 | What's unit-testable today vs. hardware-only, and the full test case list | `ai_agent_doc/TEST-PLAN.md` |

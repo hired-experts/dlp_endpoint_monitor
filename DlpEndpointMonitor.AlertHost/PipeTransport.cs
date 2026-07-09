@@ -1,0 +1,129 @@
+using System.IO;
+using System.IO.Pipes;
+using System.Text.Json;
+using DlpEndpointMonitor.AlertContracts;
+
+namespace DlpEndpointMonitor.AlertHost;
+
+/// <summary>
+/// Newline-delimited JSON transport over the shared <see cref="AlertPipe"/> name - mirrors the
+/// stdin/stdout newline-JSON convention already used between DlpEndpointMonitor and its Node
+/// agent. The session's singleton owner runs <see cref="Server"/>; every later AlertHost
+/// invocation in that session is a one-shot <see cref="TrySendToOwner"/> client that writes
+/// exactly one line and exits.
+/// </summary>
+static class PipeTransport
+{
+    const int ConnectTimeoutMs = 2000;
+
+    /// <summary>
+    /// Sends one AlertRequest to whichever AlertHost instance currently owns this session's
+    /// pipe. Returns false (never throws) if no owner is listening - the caller decides what
+    /// that means, it is not necessarily an error (e.g. no owner has started yet).
+    /// </summary>
+    public static bool TrySendToOwner(AlertRequest request)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", AlertPipe.Name, PipeDirection.Out);
+            client.Connect(ConnectTimeoutMs);
+            using var writer = new StreamWriter(client) { AutoFlush = true };
+            writer.WriteLine(JsonSerializer.Serialize(request, AlertJsonContext.Default.AlertRequest));
+            return true;
+        }
+        catch
+        {
+            // Not fatal - just means no owner is currently listening on this session's pipe.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Hosts the session-owner side of the pipe: accepts one client connection at a time,
+    /// reads newline-delimited JSON AlertRequest lines, and forwards each parsed request to
+    /// the callback given at construction, until <see cref="Dispose"/> is called.
+    /// </summary>
+    public sealed class Server : IDisposable
+    {
+        readonly Action<AlertRequest> _onReceived;
+        readonly CancellationTokenSource _cts = new();
+        readonly Task _acceptLoop;
+
+        public Server(Action<AlertRequest> onReceived)
+        {
+            _onReceived = onReceived;
+            _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
+        }
+
+        async Task AcceptLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                NamedPipeServerStream pipe;
+                try
+                {
+                    pipe = new NamedPipeServerStream(
+                        AlertPipe.Name, PipeDirection.In, 1,
+                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                }
+                catch (Exception ex)
+                {
+                    // Cannot create the pipe at all (e.g. name collision from a stale handle) -
+                    // no client can ever reach us; log and stop trying rather than spin forever.
+                    Console.Error.WriteLine($"[AlertHost] failed to create pipe server: {ex.Message}");
+                    return;
+                }
+
+                try
+                {
+                    await pipe.WaitForConnectionAsync(token).ConfigureAwait(false);
+                    await ReadLinesAsync(pipe, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Shutting down - fall through and let the while-condition exit the loop.
+                }
+                catch (IOException)
+                {
+                    // Client disconnected mid-read - not fatal, loop back for the next client.
+                }
+                finally
+                {
+                    pipe.Dispose();
+                }
+            }
+        }
+
+        async Task ReadLinesAsync(NamedPipeServerStream pipe, CancellationToken token)
+        {
+            using var reader = new StreamReader(pipe);
+            while (!token.IsCancellationRequested)
+            {
+                string? line = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                if (line is null) break; // client disconnected
+                if (line.Length == 0) continue;
+
+                AlertRequest? request;
+                try
+                {
+                    request = JsonSerializer.Deserialize(line, AlertJsonContext.Default.AlertRequest);
+                }
+                catch (JsonException ex)
+                {
+                    // One malformed line must never take down the server's accept loop.
+                    Console.Error.WriteLine($"[AlertHost] discarding malformed alert line: {ex.Message}");
+                    continue;
+                }
+                if (request is not null)
+                    _onReceived(request);
+            }
+        }
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            try { _acceptLoop.Wait(TimeSpan.FromSeconds(2)); } catch { /* best-effort on shutdown */ }
+            _cts.Dispose();
+        }
+    }
+}

@@ -1,4 +1,7 @@
 <Solution>
   <Project Path="DlpEndpointMonitor/DlpEndpointMonitor.csproj" />
   <Project Path="DlpEndpointMonitor.Tests/DlpEndpointMonitor.Tests.csproj" />
+  <Project Path="DlpEndpointMonitor.AlertContracts/DlpEndpointMonitor.AlertContracts.csproj" />
+  <Project Path="DlpEndpointMonitor.AlertHost/DlpEndpointMonitor.AlertHost.csproj" />
+  <Project Path="DlpEndpointMonitor.AlertHost.Tests/DlpEndpointMonitor.AlertHost.Tests.csproj" />
 </Solution>
