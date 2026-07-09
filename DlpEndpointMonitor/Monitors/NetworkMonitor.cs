@@ -76,6 +76,7 @@ sealed class NetworkMonitor : IDisposable
                     devicePath,
                     usbClass,
                     classGuid,
+                    parsed?.InstanceId,
                     EventEmitter.Ts()));
         }
         catch (Exception ex)
@@ -141,6 +142,7 @@ sealed class NetworkMonitor : IDisposable
             parsed.Serial,
             parsed.UsbClass,
             parsed.ClassGuid,
+            parsed.InstanceId,
             parsed.RawPath,
             allowed,
             EventEmitter.Ts()));

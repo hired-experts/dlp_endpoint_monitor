@@ -9,10 +9,12 @@ namespace DlpEndpointMonitor.Core;
 /// whichever succeeded). <see cref="Mac"/> is set only for a Bluetooth-blocked device (mirrors
 /// <see cref="UsbDeviceEntry"/>'s existing precedent of carrying both USB and Bluetooth
 /// identity side by side) - <c>Vid</c>/<c>Pid</c> are empty strings in that case, since a
-/// Bluetooth device has no USB vendor/product ID.
+/// Bluetooth device has no USB vendor/product ID. <see cref="GroupId"/> is set only for a
+/// USB-blocked composite device (mirrors <see cref="Actions.ParsedDevice.GroupId"/>) so
+/// UsbMonitor's restore path can report which composite group an unblock corresponds to.
 /// </summary>
 public sealed record DisabledDeviceRecord(
-    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind, string? Mac = null);
+    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind, string? Mac = null, string? GroupId = null);
 
 internal sealed class DisabledDevicesState
 {

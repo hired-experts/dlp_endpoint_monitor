@@ -94,6 +94,7 @@ sealed class UsbMonitor : IDisposable
                         kind,
                         classGuid,
                         parsed?.GroupId,
+                        parsed?.InstanceId,
                         EventEmitter.Ts()));
             }
         }
@@ -205,6 +206,7 @@ sealed class UsbMonitor : IDisposable
             parsed.Kind,
             parsed.ClassGuid,
             parsed.GroupId,
+            parsed.InstanceId,
             parsed.RawPath,
             allowed,
             EventEmitter.Ts()));
@@ -306,7 +308,7 @@ sealed class UsbMonitor : IDisposable
         }
 
         if (disabledId is not null)
-            _disabled.Add(new DisabledDeviceRecord(disabledId, parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind));
+            _disabled.Add(new DisabledDeviceRecord(disabledId, parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind, GroupId: parsed.GroupId));
 
         IEvent ev = ok
             ? new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, EventEmitter.Ts())
@@ -391,7 +393,7 @@ sealed class UsbMonitor : IDisposable
                 {
                     _disabled.Remove(d.InstanceId);
                     restored++;
-                    EventEmitter.Emit(new UsbDeviceUnblockedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.InstanceId, EventEmitter.Ts()));
+                    EventEmitter.Emit(new UsbDeviceUnblockedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, EventEmitter.Ts()));
                 }
                 else if (error is not null && error.Contains("Locate", StringComparison.Ordinal))
                 {
@@ -404,7 +406,7 @@ sealed class UsbMonitor : IDisposable
                     // Present but re-enable FAILED: keep the record so the next restore retries
                     // it (do NOT orphan a still-disabled device), and surface the failure.
                     stillBlocked++;
-                    EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.InstanceId, error, EventEmitter.Ts()));
+                    EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, error, EventEmitter.Ts()));
                 }
             }
             EventEmitter.EmitInfo($"usb_policy_restore: restored {restored}, still-blocked {stillBlocked}");
