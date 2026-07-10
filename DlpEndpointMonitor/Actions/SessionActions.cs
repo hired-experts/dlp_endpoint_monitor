@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using DlpEndpointMonitor.Win32;
@@ -31,6 +32,64 @@ static class SessionActions
     /// </summary>
     public static bool IsRunningInSession(uint sessionId)
         => (uint)Process.GetCurrentProcess().SessionId == sessionId;
+
+    /// <summary>
+    /// Kills any process at <paramref name="exePath"/> already running in
+    /// <paramref name="sessionId"/> (excluding this process itself). Used at TWO points in the
+    /// companion lifecycle, both closing the same gap: nothing previously stopped a companion from
+    /// lingering once orphaned, whether that happened because a PRIOR primary generation exited
+    /// without cleaning up after itself (called again just before launching a fresh companion, so
+    /// restarts replace rather than accumulate), or because THIS primary is shutting down right now
+    /// (called from Program.cs's shutdown path and WindowsControlHandler's ShutdownCmd, so an
+    /// uninstall/service-stop/`shutdown` command doesn't leave today's companion behind for the
+    /// next start to clean up). Either way, a lingering companion still independently hooks the
+    /// clipboard/keyboard with whatever policy was current at ITS OWN startup, silently enforcing
+    /// stale rules alongside (or after) the primary that owned it is gone - confirmed live: a
+    /// disabled clipboard-blacklist rule kept being enforced by an orphaned companion, and after an
+    /// MSI uninstall the companion was left running with no primary at all. Best-effort by design:
+    /// a failure to enumerate or kill any one process must never block the caller's own next step
+    /// (launching a new companion, or exiting) - partial cleanup beats none.
+    /// </summary>
+    public static int TerminateCompanionProcesses(uint sessionId, string exePath)
+    {
+        int killed = 0;
+        string exeName = Path.GetFileNameWithoutExtension(exePath);
+
+        foreach (var process in Process.GetProcessesByName(exeName))
+        {
+            try
+            {
+                using (process)
+                {
+                    if (process.Id == Environment.ProcessId) continue;
+                    if ((uint)process.SessionId != sessionId) continue;
+
+                    // Best-effort path confirmation - a companion always shares this exe's own
+                    // path, but querying another session's MainModule can itself fail with
+                    // access-denied even when TerminateProcess would succeed. Only skip when the
+                    // path is POSITIVELY a different executable; an inconclusive query still
+                    // falls through to the kill attempt, since name + session already matched.
+                    try
+                    {
+                        if (!string.Equals(process.MainModule?.FileName, exePath, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+                    catch { /* inconclusive - fall through to the kill attempt below */ }
+
+                    process.Kill();
+                    process.WaitForExit(2000);
+                    killed++;
+                }
+            }
+            catch
+            {
+                // Best-effort - a process that already exited, or one we genuinely can't
+                // terminate, must not block launching the new companion.
+            }
+        }
+
+        return killed;
+    }
 
     /// <summary>
     /// Launches <paramref name="exePath"/> into a session DIFFERENT from the one this process is

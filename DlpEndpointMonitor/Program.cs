@@ -181,6 +181,13 @@ ClipboardMonitor? clipboardMonitor = null;
 bool runClipboardLocally = true;
 ClipboardCompanionRelay.Server? relayServer = null;
 
+// Set below only when a companion is actually launched, closing over the exact session/exePath
+// used for that launch. Called from this process's own shutdown path (both the Ctrl+Break/
+// cancellation route and the `shutdown` stdin command) so an uninstall, service stop, or
+// explicit shutdown command doesn't leave today's companion running as tomorrow's orphan - see
+// SessionActions.TerminateCompanionProcesses's doc comment for the production bug this closes.
+Action stopCompanion = () => { };
+
 // How DisplayMonitor's two topology-mutating calls are invoked. Default: this process calls
 // DisplayActions directly (interactive/dev run, or no user session to cross into yet). When a
 // companion IS launched below, these are swapped for relay calls routed to that companion — the
@@ -217,6 +224,18 @@ else
     relayServer = new ClipboardCompanionRelay.Server();
 
     string? exePath = Environment.ProcessPath; // this process's own executable path
+
+    // Kill any companion left behind by a prior primary generation BEFORE launching a fresh one -
+    // otherwise it lingers indefinitely, still independently enforcing whatever policy was
+    // current at its own startup (see SessionActions.TerminateCompanionProcesses for the real
+    // production bug this fixes).
+    if (exePath is not null)
+    {
+        int staleKilled = SessionActions.TerminateCompanionProcesses(activeSession.Value, exePath);
+        if (staleKilled > 0)
+            EventEmitter.EmitInfo($"terminated {staleKilled} stale companion process(es) left over from a prior run before launching a fresh one");
+    }
+
     var (ok, error) = exePath is null
         ? (false, "cannot resolve own executable path (Environment.ProcessPath was null)")
         : SessionActions.LaunchIntoSession(activeSession.Value, exePath, "--session-companion");
@@ -239,6 +258,18 @@ else
         // Session-0 process's own (empty) BluetoothActions.EnumerateConnected.
         bluetoothRelayClient = new BluetoothCompanionRelay.Client();
         enumerateBluetoothDevices = () => bluetoothRelayClient.Enumerate();
+
+        // Closes over THIS launch's own exePath/session so shutdown can clean up the exact
+        // companion just started, regardless of how this primary is later told to stop.
+        // exePath! is proven non-null here: ok can only be true via the branch of the ternary
+        // above that requires exePath is not null to even call LaunchIntoSession.
+        string companionExePath = exePath!;
+        stopCompanion = () =>
+        {
+            int killed = SessionActions.TerminateCompanionProcesses(activeSession.Value, companionExePath);
+            if (killed > 0)
+                EventEmitter.EmitInfo($"terminated {killed} companion process(es) on shutdown");
+        };
 
         EventEmitter.EmitInfo("clipboard/keyboard companion launched into interactive session");
     }
@@ -329,7 +360,7 @@ var dispatcher = new CommandDispatcher(
         restoreDevices: () => { usbMonitor!.RestoreCompliant(); bluetoothMonitor!.RestoreCompliant(); displayMonitor!.RestoreCompliant(); networkMonitor!.RestoreCompliant(); }),
     clipboardProtection: new WindowsClipboardProtectionHandler(clipboardWhitelist, clipboardBlacklist,
         reevaluate: () => clipboardMonitor!.ApplyPolicy()),
-    control:           new WindowsControlHandler());
+    control:           new WindowsControlHandler(stopCompanion));
 
 try
 {
@@ -342,5 +373,8 @@ finally
     relayServer?.Dispose(); // stop the companion relay listener, if one was hosted
     displayRelayClient?.Dispose(); // release the display relay client, if one was constructed
     bluetoothRelayClient?.Dispose(); // release the bluetooth relay client, if one was constructed
+    // Covers the Ctrl+Break/cancellation shutdown route - WindowsControlHandler's ShutdownCmd
+    // handler covers the `shutdown` stdin command route. A no-op if no companion was launched.
+    stopCompanion();
     EventEmitter.EmitInfo("shutdown");
 }
