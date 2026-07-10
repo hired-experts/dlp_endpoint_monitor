@@ -28,21 +28,14 @@ sealed class WindowsClipboardProtectionHandler : IClipboardProtectionHandler
 
     // ── Whitelist ─────────────────────────────────────────────────────────────
 
-    public void Handle(ClipboardWhitelistEnableCmd command)
-    {
+    public void Handle(ClipboardWhitelistEnableCmd command) => CommandReply.After(command.Id,
         // Key divergence from device policy: do NOT disable the blacklist here - both clipboard
         // lists are independently toggleable, being enabled at once is a valid, intended state.
-        _whitelist.SetEnabled(true);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+        () => _whitelist.SetEnabled(true),
+        _reevaluate);
 
-    public void Handle(ClipboardWhitelistDisableCmd command)
-    {
-        _whitelist.SetEnabled(false);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardWhitelistDisableCmd command) =>
+        CommandReply.After(command.Id, () => _whitelist.SetEnabled(false), _reevaluate);
 
     public void Handle(ClipboardWhitelistGetCmd command)
     {
@@ -51,51 +44,31 @@ sealed class WindowsClipboardProtectionHandler : IClipboardProtectionHandler
         EventEmitter.Emit(new ClipboardWhitelistGetEvent(command.Id, true, _whitelist.IsEnabled, entries));
     }
 
-    public void Handle(ClipboardWhitelistClearCmd command)
-    {
-        _whitelist.Clear();
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardWhitelistClearCmd command) =>
+        CommandReply.After(command.Id, () => _whitelist.Clear(), _reevaluate);
 
-    public void Handle(ClipboardWhitelistAddCmd command)
-    {
-        _whitelist.Add(new ClipboardRuleEntry(command.Pattern, command.Kind, command.Label));
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardWhitelistAddCmd command) => CommandReply.After(command.Id,
+        () => _whitelist.Add(new ClipboardRuleEntry(command.Pattern, command.Kind, command.Label)),
+        _reevaluate);
 
-    public void Handle(ClipboardWhitelistRemoveCmd command)
-    {
-        _whitelist.Remove(command.Pattern, command.Kind);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardWhitelistRemoveCmd command) => CommandReply.After(command.Id,
+        () => _whitelist.Remove(command.Pattern, command.Kind),
+        _reevaluate);
 
-    public void Handle(ClipboardWhitelistSetCmd command)
-    {
-        _whitelist.Set(command.Entries
-            .Select(entry => new ClipboardRuleEntry(entry.Pattern, entry.Kind, entry.Label)));
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardWhitelistSetCmd command) => CommandReply.After(command.Id,
+        () => _whitelist.Set(command.Entries
+            .Select(entry => new ClipboardRuleEntry(entry.Pattern, entry.Kind, entry.Label))),
+        _reevaluate);
 
     // ── Blacklist ─────────────────────────────────────────────────────────────
 
-    public void Handle(ClipboardBlacklistEnableCmd command)
-    {
+    public void Handle(ClipboardBlacklistEnableCmd command) => CommandReply.After(command.Id,
         // Same divergence as the whitelist side - do NOT disable the whitelist here.
-        _blacklist.SetEnabled(true);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+        () => _blacklist.SetEnabled(true),
+        _reevaluate);
 
-    public void Handle(ClipboardBlacklistDisableCmd command)
-    {
-        _blacklist.SetEnabled(false);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardBlacklistDisableCmd command) =>
+        CommandReply.After(command.Id, () => _blacklist.SetEnabled(false), _reevaluate);
 
     public void Handle(ClipboardBlacklistGetCmd command)
     {
@@ -104,32 +77,19 @@ sealed class WindowsClipboardProtectionHandler : IClipboardProtectionHandler
         EventEmitter.Emit(new ClipboardBlacklistGetEvent(command.Id, true, _blacklist.IsEnabled, entries));
     }
 
-    public void Handle(ClipboardBlacklistClearCmd command)
-    {
-        _blacklist.Clear();
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardBlacklistClearCmd command) =>
+        CommandReply.After(command.Id, () => _blacklist.Clear(), _reevaluate);
 
-    public void Handle(ClipboardBlacklistAddCmd command)
-    {
-        _blacklist.Add(new ClipboardRuleEntry(command.Pattern, command.Kind, command.Label));
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardBlacklistAddCmd command) => CommandReply.After(command.Id,
+        () => _blacklist.Add(new ClipboardRuleEntry(command.Pattern, command.Kind, command.Label)),
+        _reevaluate);
 
-    public void Handle(ClipboardBlacklistRemoveCmd command)
-    {
-        _blacklist.Remove(command.Pattern, command.Kind);
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardBlacklistRemoveCmd command) => CommandReply.After(command.Id,
+        () => _blacklist.Remove(command.Pattern, command.Kind),
+        _reevaluate);
 
-    public void Handle(ClipboardBlacklistSetCmd command)
-    {
-        _blacklist.Set(command.Entries
-            .Select(entry => new ClipboardRuleEntry(entry.Pattern, entry.Kind, entry.Label)));
-        Task.Run(_reevaluate);
-        EventEmitter.Emit(new ReplyEvent(command.Id, true));
-    }
+    public void Handle(ClipboardBlacklistSetCmd command) => CommandReply.After(command.Id,
+        () => _blacklist.Set(command.Entries
+            .Select(entry => new ClipboardRuleEntry(entry.Pattern, entry.Kind, entry.Label))),
+        _reevaluate);
 }
