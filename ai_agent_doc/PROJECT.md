@@ -25,6 +25,14 @@ Two logical threads matter:
   notifications (`RegisterDeviceNotification`), and the low-level keyboard hook
   (`SetWindowsHookEx(WH_KEYBOARD_LL, ...)`) are all thread-affine to whichever thread
   pumps messages, and Windows requires that thread to be STA.
+  Caveat for the two clipboard components: `ClipboardMonitor` and `KeyboardHook` only run on
+  *this* thread when the process is already in the interactive session. Under the real
+  LocalSystem-service deployment the process is in Session 0 (no desktop), so `Program.cs`
+  instead launches a `--clipboard-companion` copy of this exe into the logged-on user's session
+  (via `Actions/SessionActions.cs`), which runs its own STA thread hosting only
+  `MessageWindow` + `ClipboardMonitor` + `KeyboardHook` and relays its events back to the
+  primary's stdout over `Core/ClipboardCompanionRelay`'s named pipe. In that case the primary
+  builds neither locally. See AGENTS.md section 10's Session-0 companion bullet.
 - **The main thread**, which waits for the message window to be ready, then builds the
   `CommandDispatcher` and awaits `RunAsync()` - the stdin read loop.
 
@@ -400,16 +408,19 @@ For a non-Bluetooth-backed device, in order, stopping at the first success:
    device. This is fundamentally different from disable/enable and must not be treated as
    equivalent when reasoning about "will `RestoreCompliant` bring this back."
 
-For a Bluetooth-backed HID device (`GetBluetoothDeviceNode` returns non-null): disable
-*that* node (the `BTHLEDEVICE\`/`BTHENUM\` peripheral node), full stop - no group/eject
-escalation, because "the group" for a BT peripheral would be the shared Bluetooth radio,
-which must never be disabled (it would take out every paired Bluetooth device at once).
-This path exists because disabling the raw HID leaf node is unreliable: vendor software
-(e.g. Logitech Options) silently re-enables it.
+For a Bluetooth-backed HID device (`GetBluetoothDeviceNode` returns non-null): resolve that
+node's own MAC via `BluetoothActions.ParseMacFromPath` and unpair via
+`BluetoothActions.RemovePairing(mac)`, full stop - no group/eject escalation, no
+`DisabledDevices` record, because "the group" for a BT peripheral would be the shared
+Bluetooth radio (which must never be disabled/unpaired - it would take out every paired
+Bluetooth device at once) and there is nothing to restore once unpaired (see 5.5). If the
+resolved node's MAC can't be parsed (not normally reachable), this falls back to
+`UsbActions.DisableDevice` on that node, tracked in `DisabledDevices` like any other
+disable, purely so blocking never silently no-ops for that one edge case.
 
-Whichever instance ID actually got disabled (`disabledId`) is recorded in
-`DisabledDevices`, keyed by that exact ID - not by VID/PID/kind - because that ID is what
-`CM_Enable_DevNode` needs later, and a disabled device is invisible to interface
+For the non-Bluetooth path, whichever instance ID actually got disabled (`disabledId`) is
+recorded in `DisabledDevices`, keyed by that exact ID - not by VID/PID/kind - because that ID
+is what `CM_Enable_DevNode` needs later, and a disabled device is invisible to interface
 enumeration (it has no active interface), so there is no other way to rediscover it. Note
 this recorded identity is whichever interface actually triggered the escalation (e.g. the
 `Hid` sibling, not the `Keyboard` one) - section 5.4 explains why `RestoreCompliant` does
@@ -455,17 +466,30 @@ Outcome handling per record is unchanged from before:
 This whole mechanism is what makes "unblock re-enables the device" correct even when the
 process restarted between the block and the unblock - the record survives on disk.
 
-### 5.5 Bluetooth blocking (`BluetoothMonitor`, reversible disable with unpair fallback)
+### 5.5 Bluetooth blocking (`BluetoothMonitor`, unpair as the primary and only action)
 
-Blocking a Bluetooth device disables its own PnP node (`UsbActions.DisableDevice`, the same
-mechanism USB devices use) rather than unpairing it - the device stays paired but
-non-functional, and `BluetoothMonitor.RestoreCompliant` can bring it back automatically once
-policy allows it again, symmetric with USB. `BluetoothActions.FindInstanceIdByMac(mac)`
-resolves the MAC address the classic Bluetooth API gives us (`BluetoothFindFirstDevice`/
-`BluetoothFindNextDevice`, used by `EnumerateConnected`) to a PnP instance ID, since that API
-never exposes one directly - it walks the `BTHENUM` (classic) and `BTHLE` (BLE) PnP enumerator
-branches directly via `SetupDiGetClassDevsByEnumerator`/`SetupDiEnumDeviceInfo` (device
-*nodes*, not interfaces) and matches by MAC embedded in each node's own instance ID.
+Blocking a Bluetooth device removes its pairing (`BluetoothActions.RemovePairing`,
+`BluetoothRemoveDevice`) rather than disabling its PnP node. This used to be the other way
+around (disable-primary, unpair only as a fallback), but Windows Settings' Bluetooth
+Connected/Paired indicator reads the Bluetooth pairing/link-state store, **not** PnP devnode
+enabled/disabled state - `CM_Disable_DevNode` correctly stops HID input reaching any app, but
+can never change what Settings displays, because Settings reads a different data source
+entirely. Only an actual unpair does. The trade this makes: a device blocked this way can no
+longer be auto-restored by `BluetoothMonitor.RestoreCompliant` when policy loosens - the user
+must manually re-pair it (see AGENTS.md section 7's carve-out).
+
+`BluetoothMonitor.BlockDevice(mac, kind, name)` already has the MAC address (from
+`EnumerateConnected`'s classic Bluetooth API or from a parsed device-change path) and calls
+`RemovePairing` directly - no PnP node lookup needed.
+
+`UsbMonitor.BlockDevice`'s Bluetooth branch is different: it arrives via a HID *interface*
+event, which only gives an instance ID, not a MAC, so it still needs
+`UsbActions.GetBluetoothDeviceNode(parsed.InstanceId)` to find the peripheral's own PnP node
+first, then `BluetoothActions.ParseMacFromPath` to extract that node's MAC before it can call
+`RemovePairing`. In the (not normally reachable) case where a resolved node's MAC can't be
+parsed, it falls back to `UsbActions.DisableDevice` on that node so blocking never silently
+no-ops - this is a parsing-safety fallback, not a policy choice, and does not get tracked in
+`DisabledDevices` in the normal (unpair) path.
 
 **Verified BLE device tree is three levels deep, one more than classic Bluetooth** (confirmed
 live via `Get-PnpDevice`/`Get-PnpDeviceProperty` against real hardware):
@@ -476,24 +500,18 @@ BTH\MS_BTHLE\...                                  (enumerator driver - never tou
             -> HID\{...}_..._COL0N\...             (the actual input-delivering leaf)
 ```
 `BTHLEDEVICE\` is **not** the peripheral - it is a GATT-service child, one level below the
-true `BTHLE\` node. Both `BluetoothActions.FindInstanceIdByMac` and
-`UsbActions.GetBluetoothDeviceNode` (the sibling mechanism `UsbMonitor` uses for
-Bluetooth-backed HID devices arriving via their own HID interface) walk all the way up to
-`BTHLE\`, never stopping at `BTHLEDEVICE\`. Classic Bluetooth (`BTHENUM\`) has no such extra
-layer - its own node is where both functions stop directly.
+true `BTHLE\` node. `UsbActions.GetBluetoothDeviceNode` (the mechanism `UsbMonitor` uses for
+Bluetooth-backed HID devices arriving via their own HID interface) walks all the way up to
+`BTHLE\`, never stopping at `BTHLEDEVICE\` - stopping there would resolve the MAC of a GATT
+service instead of the peripheral. Classic Bluetooth (`BTHENUM\`) has no such extra layer -
+its own node is where the walk stops directly.
 
-**Fallback, not a guarantee**: if `FindInstanceIdByMac` can't find a matching node (an
-unusual device, a profile this hasn't been verified against), `BlockDevice` falls back to the
-old `RemovePairing` unconditionally - the device is still blocked, just via the irreversible
-path for that one device, rather than silently leaving a non-compliant device connected. A
-disable that genuinely *fails* after the node *was* found does not fall back to unpair - that
-would mask a real failure as an unresolvable-device case.
-
-`DisabledDeviceRecord` carries an optional `Mac` (mirroring `UsbDeviceEntry`'s existing
-USB/Bluetooth side-by-side identity pattern) so `RestoreCompliant` can tell a
-Bluetooth-disabled record apart from a USB one in the same persisted list. A device blocked
-via the unpair fallback has no record and cannot be restored in software - re-pairing is
-manual, same as before this change.
+`DisabledDeviceRecord` still carries an optional `Mac` field (mirroring `UsbDeviceEntry`'s
+existing USB/Bluetooth side-by-side identity pattern), but nothing new populates it going
+forward - it only still matters for `BluetoothMonitor.RestoreCompliant` to drain any
+pre-existing record left over from a machine that was running the old disable-primary binary
+before this change shipped. A device blocked via unpair has no record and cannot be restored
+in software - re-pairing is manual.
 
 ### 5.6 Display/monitor blocking (`DisplayMonitor`, `DisplayActions`)
 
@@ -956,14 +974,18 @@ lines look the way they do, so a future change does not accidentally reintroduce
   whitelist could connect." See section 5.8 for the full fix (`ParsePartialDevice`/
   `ParseMonitorPath` no longer return `null` for these cases) and the `IsProtectedInternal`
   extension (section 5.1) added as its safety net.
-- **[fixed] Disabling/clearing whitelist didn't restore Bluetooth or external displays.**
-  Two unrelated causes: (1) `EnableExternalDisplays` hardcoded `ok = true` regardless of the
-  actual `SetDisplayConfig` result, so a real failure was silently reported as success (see
-  section 5.6); (2) blocking a Bluetooth device unpaired it outright, and Windows has no API
-  to undo an unpair - there was no restore path to have a bug in, by design. Fixed by
-  switching Bluetooth blocking to a reversible device-node disable (section 5.5), with a
-  fallback to the old unpair only when the new MAC-to-instance-ID resolution can't find a
-  matching node, so blocking never silently stops working for an unresolvable device.
+- **[fixed, then superseded] Disabling/clearing whitelist didn't restore Bluetooth or
+  external displays.** Two unrelated causes: (1) `EnableExternalDisplays` hardcoded
+  `ok = true` regardless of the actual `SetDisplayConfig` result, so a real failure was
+  silently reported as success (see section 5.6); (2) blocking a Bluetooth device unpaired it
+  outright, and Windows has no API to undo an unpair - there was no restore path to have a bug
+  in, by design. Fixed at the time by switching Bluetooth blocking to a reversible
+  device-node disable, with a fallback to unpair only when MAC-to-instance-ID resolution
+  couldn't find a matching node. **This was later superseded**: Bluetooth blocking is now
+  unpair-based again, deliberately - see section 5.5 for why (Windows Settings' Connected/
+  Paired indicator reads the pairing store, not devnode state, so a disable-based primary
+  action never made Settings agree with reality). The non-restorability this reintroduces is
+  an accepted trade, not a regression of this fix.
 - **[fixed] `UsbActions.GetBluetoothDeviceNode` stopped one level too shallow for BLE
   devices.** It treated `BTHENUM\` (classic) and `BTHLEDEVICE\` (BLE) as equivalent "the
   peripheral's own node," but live verification showed `BTHLEDEVICE\` is actually a
@@ -1052,10 +1074,10 @@ lines look the way they do, so a future change does not accidentally reintroduce
   `NetworkMonitor`) for the fix.
 - **Classic Bluetooth (`BTHENUM\`) device-tree assumptions are not live-verified**, unlike
   BLE (section 5.5) - no classic-paired device was available to test against this session.
-  `BluetoothActions.FindInstanceIdByMac`/`UsbActions.GetBluetoothDeviceNode` both assume
-  `BTHENUM\` is a flat, 2-level hierarchy (peripheral -> HID child) with no intermediate layer
-  analogous to BLE's `BTHLEDEVICE\`. Verify with `Get-PnpDevice | Where-Object { $_.InstanceId
-  -match '^BTHENUM' }` against a real classic-paired device before trusting this path blind.
+  `UsbActions.GetBluetoothDeviceNode` assumes `BTHENUM\` is a flat, 2-level hierarchy
+  (peripheral -> HID child) with no intermediate layer analogous to BLE's `BTHLEDEVICE\`.
+  Verify with `Get-PnpDevice | Where-Object { $_.InstanceId -match '^BTHENUM' }` against a
+  real classic-paired device before trusting this path blind.
 - **Display restore may still need a symmetric-reactivation redesign.** The confirmed
   `EnableExternalDisplays` bug (section 5.6/10) is fixed, but if `SDC_TOPOLOGY_EXTEND` itself
   turns out not to reliably reactivate a path `DisableExternalDisplays` deliberately dropped
@@ -1269,8 +1291,8 @@ can carry a blank string despite the compile-time non-nullable signature.
 | Group compliance for composite USB devices | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
 | The built-in-input safety gate | `Actions/UsbActions.cs` (`IsProtectedInternal`) |
 | Why unclassifiable devices are blocked under whitelist | `Actions/UsbActions.cs` (`ParsePartialDevice`), `Actions/DisplayActions.cs` (`ParseMonitorPath`) |
-| Bluetooth device matching/blocking/restore | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`) |
-| Why `BTHLEDEVICE\` is not the Bluetooth peripheral's own node | `Actions/UsbActions.cs` (`GetBluetoothDeviceNode`), `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`), PROJECT.md section 5.5 |
+| Bluetooth device matching/blocking/restore | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`RemovePairing`) |
+| Why `BTHLEDEVICE\` is not the Bluetooth peripheral's own node | `Actions/UsbActions.cs` (`GetBluetoothDeviceNode`), PROJECT.md section 5.5 |
 | Display topology blocking/restore | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
 | GUID/CoD -> DeviceKind resolution | `Core/UsbKind.cs`, `Actions/BluetoothActions.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |

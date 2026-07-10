@@ -75,8 +75,10 @@ second process exists and how it talks to the first.
 
 ```
 DlpEndpointMonitor/
-  Program.cs                 entry point: starts the message-loop thread, wires up the
-                              CommandDispatcher, runs until stdin closes or WM_QUIT
+  Program.cs                 entry point: --schema and --session-companion early branches, then
+                              starts the message-loop thread, decides whether clipboard/keyboard run
+                              locally or via a session-crossed companion, wires up the
+                              CommandDispatcher, runs until stdin closes or WM_QUIT (see section 10)
   Core/
     CommandDispatcher.cs      reads stdin lines, deserializes by `cmd`, dispatches to a handler
     Enums.cs                  EventType, CommandType, DeviceKind, ClipboardKind, ProtectionMode
@@ -93,6 +95,30 @@ DlpEndpointMonitor/
                               ReaderWriterLockSlim + atomic-temp-file-write persistence shape
     ClipboardWhitelist.cs     ClipboardWhitelist : ClipboardRuleList (IsAllowed)
     ClipboardBlacklist.cs     ClipboardBlacklist : ClipboardRuleList (IsBlocked, FindMatchedPattern)
+    ClipboardCompanionRelay.cs newline-JSON-over-named-pipe transport carrying event lines from the
+                              --session-companion instance (interactive session) back to the
+                              primary (Session 0) so the agent sees them on the primary's stdout -
+                              Server (primary, EmitRawLine forwarder) + Client (companion sender);
+                              reconnect-after-drop is an explicit known gap, see section 10
+    DisplayCompanionRelay.cs  newline-JSON request/reply named-pipe transport for display-topology
+                              commands, running the OPPOSITE direction to ClipboardCompanionRelay:
+                              the primary (which makes the whitelist/blacklist compliance decision
+                              in DisplayMonitor) sends "disable"/"enable" and blocks for one reply
+                              line; the --session-companion hosts the Server and runs the real
+                              DisplayActions call (via a Program.cs-supplied executeCommand delegate,
+                              so this file never references DisplayActions), since a SetDisplayConfig
+                              only takes effect in the interactive session - see section 10
+    BluetoothCompanionRelay.cs newline-JSON request/reply named-pipe transport for Bluetooth device
+                              enumeration, same direction as DisplayCompanionRelay: the primary
+                              (which makes the compliance decision in BluetoothMonitor) is the
+                              Client and sends "enumerate"; the --session-companion hosts the Server
+                              and runs the real BluetoothActions.EnumerateConnected (via a
+                              Program.cs-supplied delegate, so this file never references
+                              BluetoothActions' enumeration), since only the interactive session's
+                              process sees the paired devices. Unlike DisplayCompanionRelay the reply
+                              is a whole List<BtDevice> JSON array (encoded through AppJsonContext, so
+                              the free-form Name is escaped and no reflection escapes trim) - see
+                              section 10
     ClipboardOperationHint.cs correlates KeyboardHook's Ctrl+X detection with ClipboardMonitor's
                               next clipboard read, so a text cut reports "cut" instead of
                               ClipboardActions.TryReadText()'s hardcoded "copy" - see section 10
@@ -118,8 +144,8 @@ DlpEndpointMonitor/
                               OPEN on any error, see section 10)
   Actions/                    stateless Win32 P/Invoke helpers, no policy logic
     UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle
-    BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing), MAC-to-PnP-node
-                              resolution (FindInstanceIdByMac), path/CoD parsing
+    BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing - the primary
+                              block action), path/CoD parsing
     DisplayActions.cs         QueryDisplayConfig/SetDisplayConfig(Paths) topology juggling
     ClipboardActions.cs       OpenClipboard/GetClipboardData/SetClipboardData
     AlertActions.cs           ShowAlert(AlertRequest): the one stateless entry point that shows
@@ -127,6 +153,11 @@ DlpEndpointMonitor/
                               the interactive session (same-session Process.Start, or
                               WTSQueryUserToken+CreateProcessAsUser cross-session); NOT called
                               from any Monitors/* yet, see section 10
+    SessionActions.cs         stateless session-crossing helpers extracted from AlertActions'
+                              proven pattern: GetActiveConsoleSessionId / IsRunningInSession /
+                              LaunchIntoSession (WTSQueryUserToken+CreateProcessAsUser into the
+                              interactive session); used by Program.cs to launch the clipboard
+                              companion, same P/Invoke as AlertActions, see section 10
   Handlers/
     IHandlers.cs              one interface per command family (IClipboardHandler, IUsbStorageHandler,
                               IUsbDeviceHandler, IUsbProtectionHandler, IClipboardProtectionHandler,
@@ -260,7 +291,10 @@ category, add the GUID mapping there, not inline in a monitor.
   the current rules without the caller having to ask twice. See `WindowsUsbProtectionHandler`
   for exactly which mutation triggers which action - they are not all the same, and getting
   this wrong was the subject of a real bug fix (git history: "correct device blocking -
-  Bluetooth kinds, internal-device guard, dedup, unblock events").
+  Bluetooth kinds, internal-device guard, dedup, unblock events"). **Carve-out: Bluetooth-kind
+  blocks are unpair-based (`BluetoothActions.RemovePairing`), not devnode-disable-based, and
+  CANNOT be auto-restored** - an unpaired device has no record for `RestoreCompliant` to find,
+  so policy loosening will not bring it back; the user must manually re-pair it.
 - **Duplicate device entries are rejected** - `UsbDeviceList.SameDevice` compares vid/pid/
   serial/mac/kind case-insensitively (label is cosmetic and ignored); `Add`/`Set` dedupe
   against this before persisting.
@@ -422,27 +456,36 @@ what is and is not covered and why.
   record's stale kind, in isolation. Getting this wrong was a real shipped bug: a
   `{kind: keyboard}`-only whitelist entry ended up disabling the whole physical keyboard via
   a sibling `Hid`-kind interface's collateral block.
-- **Bluetooth-backed HID devices are disabled at the Bluetooth device node, never the HID
-  leaf, and never the shared radio.** `UsbActions.GetBluetoothDeviceNode` finds the right
-  node; disabling the HID leaf gets silently re-enabled by vendor software (e.g. Logitech
-  Options), and disabling the radio would take out every Bluetooth device at once.
-  `HasBluetoothAncestor` is checked *before* any USB-group escalation so a wireless
-  keyboard is never mistaken for an internal USB one (the BT radio itself is often a USB
-  device sitting above it in the tree).
+- **Bluetooth-backed HID devices are unpaired at the Bluetooth device node's own MAC, never
+  the HID leaf, and never the shared radio.** `UsbActions.GetBluetoothDeviceNode` finds the
+  right node; `BluetoothActions.ParseMacFromPath` extracts that node's MAC, which is then
+  passed to `BluetoothActions.RemovePairing` - unpairing the HID leaf or the radio is not an
+  option (the leaf isn't a pairing itself, and unpairing the radio would take out every
+  Bluetooth device at once). `HasBluetoothAncestor` is checked *before* any USB-group
+  escalation so a wireless keyboard is never mistaken for an internal USB one (the BT radio
+  itself is often a USB device sitting above it in the tree).
 - **For BLE, `BTHLEDEVICE\` is NOT the Bluetooth peripheral's own node - it's a GATT-service
   child, one level below the true `BTHLE\` peripheral node.** Verified live against real
   hardware (`Get-PnpDevice`): a BLE mouse's tree is `BTH\MS_BTHLE\...` (enumerator, never
   touch) -> `BTHLE\DEV_<mac>\...` (the actual device, e.g. "MX Vertical") ->
   `BTHLEDEVICE\{service-guid}..._<mac>\...` (one GATT service, e.g. the HID service) ->
   `HID\{...}_COL0N\...` (the input leaf). Classic Bluetooth (`BTHENUM\`) has no such extra
-  layer. Both `UsbActions.GetBluetoothDeviceNode` and `BluetoothActions.FindInstanceIdByMac`
-  walk all the way up to `BTHLE\` for BLE devices - never stop at `BTHLEDEVICE\`, or you're
-  disabling a GATT service instead of the peripheral (Windows cascades a parent's disable to
-  its children, so this may still "work" by accident, but it's the wrong node).
-- **Bluetooth blocking falls back to `RemovePairing` (irreversible unpair) only when the new
-  MAC-to-instance-ID resolution can't find a matching PnP node** - never as the primary path
-  and never when the node WAS found but disabling it failed (that's a real failure, not an
-  unresolvable-device case, and must surface as such, not be masked by a silent unpair).
+  layer. `UsbActions.GetBluetoothDeviceNode` walks all the way up to `BTHLE\` for BLE devices -
+  never stop at `BTHLEDEVICE\`, or you resolve the MAC of a GATT service instead of the
+  peripheral (Windows cascades a parent's disable to its children, so a disable-based approach
+  may still "work" by accident on the wrong node, but `RemovePairing` on the wrong MAC would
+  simply fail to match any pairing at all).
+- **Bluetooth blocking is unpair-based (`BluetoothActions.RemovePairing`) as the primary and
+  only path, not a fallback.** This traded away reversibility (an unpaired device can no
+  longer be auto-restored by `RestoreCompliant` - see section 7's carve-out) for a correctness
+  requirement: Windows Settings' Connected/Paired indicator reads the Bluetooth pairing/
+  link-state store, not PnP devnode enabled/disabled state, so `CM_Disable_DevNode` (the old
+  primary action) stopped HID input but never changed what Settings displayed - only an actual
+  unpair does. Both `BluetoothMonitor.BlockDevice` (works directly from a MAC) and
+  `UsbMonitor.BlockDevice`'s Bluetooth branch (resolves the node via `GetBluetoothDeviceNode`,
+  then the MAC via `ParseMacFromPath`) call `RemovePairing` directly; `UsbMonitor` only falls
+  back to `DisableDevice` on the node in the (not normally reachable) case where a resolved
+  node's MAC can't be parsed, so blocking never silently no-ops.
 - **`KSCATEGORY_CAPTURE` is deliberately NOT mapped to `video`** in `UsbKind.cs` - it is an
   audio+video capture category that onboard HD-audio codecs also register under
   (`wavemicin`, `wavespeaker`, HDMI-audio topology), so mapping it to video made a "block
@@ -585,6 +628,73 @@ what is and is not covered and why.
   hooking/code injection into every target process - a fundamentally different, far more
   invasive architecture (fragile across app updates, and exactly the technique antivirus/EDR
   flags as rootkit-like) - not a small addition like this one.
+- **Clipboard/keyboard monitoring is structurally blind in the real LocalSystem-service
+  deployment without the companion launch - Session 0 has no desktop.** When this binary runs as
+  a service it lives in Session 0, whose clipboard and low-level keyboard hooks reach an inert,
+  never-user-touched desktop - so a `ClipboardMonitor`/`KeyboardHook` created there watches
+  nothing. `Program.cs` fixes this by reusing `AlertActions`' proven session-crossing pattern
+  (now extracted into `Actions/SessionActions.cs`): if the active console session is NOT this
+  process's own session, it launches a second copy of this SAME exe with `--session-companion`
+  into the interactive user's session (`WTSQueryUserToken` + `CreateProcessAsUser`), and skips
+  building its own local (inert) clipboard/keyboard hooks. The companion runs ONLY
+  `MessageWindow` + `ClipboardMonitor` + `KeyboardHook` - never device monitors or the stdin
+  `CommandDispatcher` (device policy stays exclusively the primary's) - shares live policy with
+  the primary through the SAME `%ProgramData%` files (a `FileSystemWatcher`, debounced because
+  the atomic temp-file-then-rename save fires several events per logical write, calls
+  `ClipboardRuleList.Reload()` when the primary mutates a list), and relays every event it emits
+  back to the primary's stdout over `Core/ClipboardCompanionRelay`'s named pipe so the agent sees
+  those events exactly as if the primary emitted them locally (`EventEmitter.RawLineSink` forwards
+  the companion's own emits into the relay Client). Launch failure fails SAFE, not silent - the
+  primary keeps its (inert-but-present) local hooks and emits a `clipboard_companion_launch`
+  error - and a session with no user logged on yet runs locally while emitting an info note that
+  protection is inactive until logon (no retry/poll to launch a companion on a later logon in
+  this pass). Reconnecting the relay after a dropped pipe connection is likewise an explicit known
+  limitation, not yet implemented. See `ai_agent_doc/PROJECT.md` section 11.
+- **Display-topology enforcement crosses the same Session-0 gap as clipboard, but in the OPPOSITE
+  direction - the decision stays in the primary, only the Win32 call is relayed to the companion.**
+  A `SetDisplayConfig` topology switch only takes effect in the session with the real desktop, so
+  when the primary runs headless in Session 0 it cannot disable/enable external displays itself.
+  The fix is deliberately NOT to move `DisplayMonitor` into the companion: all its whitelist/
+  blacklist compliance logic, the checked/blocked counting, and every `monitor_*` event stay in
+  the primary, bit-for-bit unchanged. The ONLY thing that moves is HOW its two `DisplayActions`
+  calls are invoked - `Program.cs` hands `DisplayMonitor` two `Func<(bool ok, string? error)>`
+  delegates at construction: direct `DisplayActions.DisableExternalDisplays`/`EnableExternalDisplays`
+  method groups when no companion is active (interactive/dev run, or no session yet), or
+  `displayRelayClient.SendCommand("disable"/"enable")` calls routed over `Core/DisplayCompanionRelay`
+  when a companion was launched. The companion hosts the relay Server and runs the real
+  `DisplayActions` call (through a Program.cs-supplied `executeCommand` switch delegate, so the
+  relay file itself never references `DisplayActions` - same seam as `ClipboardCompanionRelay.Server`
+  only knowing `EmitRawLine`). Unlike the clipboard relay (companion -> primary, fire-and-forget
+  event lines), this one is request/reply: the primary's synchronous `SendCommand` blocks briefly
+  for exactly one `{"ok":...}` reply before it emits its own `monitor_blocked`/`monitor_block_failed`/
+  `monitor_policy_restore` event. `SendCommand` NEVER throws - any connect/write/read/timeout/parse
+  failure comes back as `(false, reason)`, so a missing or wedged companion can degrade the topology
+  call to a clean `monitor_block_failed`, never crash the primary's `DisplayMonitor`. When you touch
+  the session-decision block in `Program.cs`, build BOTH delegate pairs (relay vs. direct) from the
+  SAME session decision that already picks `runClipboardLocally`/`relayServer` - do not re-detect the
+  session a second time. See `ai_agent_doc/PROJECT.md` section 11.
+- **Bluetooth ENUMERATION crosses the same Session-0 gap, but relayed the other way from display -
+  the companion produces the DATA, the primary keeps the DECISION.** `BluetoothActions.EnumerateConnected`
+  (`BluetoothFindFirst`/`BluetoothFindNextDevice`) only sees paired devices from a process running
+  in the interactive user's session; a headless Session-0 primary enumerates an empty set and would
+  wrongly conclude there are no Bluetooth devices to police. As with display, the fix is NOT to move
+  `BluetoothMonitor` into the companion - all its whitelist/blacklist compliance logic, composite/
+  group handling, and every `bt_*` event stay in the primary, bit-for-bit unchanged. The ONLY thing
+  that moves is HOW it obtains the device list: `Program.cs` hands `BluetoothMonitor` a
+  `Func<IReadOnlyList<BluetoothActions.BtDevice>>` at construction - a direct
+  `() => BluetoothActions.EnumerateConnected().ToList()` passthrough when no companion is active
+  (interactive/dev run, or no session yet), or `() => bluetoothRelayClient.Enumerate()` routed over
+  `Core/BluetoothCompanionRelay` when a companion was launched. The companion hosts the relay Server
+  and runs the real enumeration (through a Program.cs-supplied delegate, so the relay file never
+  references `BluetoothActions`' enumeration - same seam as the display/clipboard relays). Unlike
+  the display relay's two-shape `{"ok":...}` reply, this reply is a whole `List<BtDevice>` JSON
+  array serialized through `AppJsonContext` (so the free-form `Name` is escaped and no reflection
+  escapes the trimmed path). `Client.Enumerate` NEVER throws - any connect/write/read/timeout/parse
+  failure comes back as an EMPTY list, indistinguishable from "genuinely zero paired devices" to
+  `BluetoothMonitor`'s callers, so a missing or wedged companion degrades to "no BT devices seen",
+  never crashes the primary. Build this delegate from the SAME session decision that already picks
+  `runClipboardLocally`/`relayServer`/`displayRelayClient` - do not re-detect the session a third
+  time. See `ai_agent_doc/PROJECT.md` section 11.
 
 ---
 
@@ -599,7 +709,7 @@ what is and is not covered and why.
 | How whitelist/blacklist enable/disable/mutate interact | `Handlers/Windows/WindowsUsbProtectionHandler.cs` |
 | How a device actually gets blocked/unblocked | `Monitors/UsbMonitor.cs` (`BlockDevice`, `RestoreCompliant`), `Actions/UsbActions.cs` |
 | How a composite device's siblings are judged together | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
-| How Bluetooth devices are matched/blocked/restored | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`FindInstanceIdByMac`) |
+| How Bluetooth devices are matched/blocked/restored | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`RemovePairing`) |
 | How external displays are disabled/restored | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
 | How network adapters are matched/blocked/restored, and how the built-in NIC is protected | `Monitors/NetworkMonitor.cs`, `Actions/UsbActions.cs` (`IsBuiltIn`) |
 | Windows interface GUID -> DeviceKind mapping | `Core/UsbKind.cs` |
