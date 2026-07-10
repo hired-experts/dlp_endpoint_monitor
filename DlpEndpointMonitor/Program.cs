@@ -350,17 +350,25 @@ if (cts.IsCancellationRequested)
     return; // fatal error during startup
 
 
+// Named so ResetAllPolicyCmd (WindowsControlHandler) can reuse the exact same delegates as the
+// per-list protection handlers below, rather than owning a second, separately-wired copy.
+void ApplyPolicy() { usbMonitor!.BlockNonCompliant(); bluetoothMonitor!.BlockNonCompliant(); displayMonitor!.BlockNonCompliant(); networkMonitor!.BlockNonCompliant(); }
+void RestoreDevices() { usbMonitor!.RestoreCompliant(); bluetoothMonitor!.RestoreCompliant(); displayMonitor!.RestoreCompliant(); networkMonitor!.RestoreCompliant(); }
+void ReevaluateClipboard() => clipboardMonitor!.ApplyPolicy();
+
 var dispatcher = new CommandDispatcher(
     cancellationToken: cts.Token,
     clipboard:         new WindowsClipboardHandler(),
     usbStorage:        new WindowsUsbStorageHandler(),
     usbDevice:         new WindowsUsbDeviceHandler(),
     usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist,
-        applyPolicy:    () => { usbMonitor!.BlockNonCompliant(); bluetoothMonitor!.BlockNonCompliant(); displayMonitor!.BlockNonCompliant(); networkMonitor!.BlockNonCompliant(); },
-        restoreDevices: () => { usbMonitor!.RestoreCompliant(); bluetoothMonitor!.RestoreCompliant(); displayMonitor!.RestoreCompliant(); networkMonitor!.RestoreCompliant(); }),
+        applyPolicy:    ApplyPolicy,
+        restoreDevices: RestoreDevices),
     clipboardProtection: new WindowsClipboardProtectionHandler(clipboardWhitelist, clipboardBlacklist,
-        reevaluate: () => clipboardMonitor!.ApplyPolicy()),
-    control:           new WindowsControlHandler(stopCompanion));
+        reevaluate: ReevaluateClipboard),
+    control:           new WindowsControlHandler(stopCompanion,
+        whitelist, blacklist, clipboardWhitelist, clipboardBlacklist,
+        restoreDevices: RestoreDevices, clipboardReevaluate: ReevaluateClipboard));
 
 try
 {

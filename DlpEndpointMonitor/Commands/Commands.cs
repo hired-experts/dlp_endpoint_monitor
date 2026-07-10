@@ -156,3 +156,12 @@ record PingCmd(string? Id) : ICommand;
 
 [JsonDiscriminant(CommandType.Shutdown)]
 record ShutdownCmd(string? Id) : ICommand;
+
+// Clears every policy list at once - device whitelist, device blacklist, clipboard whitelist,
+// clipboard blacklist - each exactly as its own individual *Clear command already would (device
+// whitelist also disables itself, matching DeviceWhitelistClearCmd's factory-reset semantics;
+// the other three lists only empty, matching their own individual Clear commands). Not a
+// replacement for those - each keeps working unchanged on its own; this is a single combined
+// call for when the caller wants every list cleared at once rather than four round trips.
+[JsonDiscriminant(CommandType.ResetAllPolicy)]
+record ResetAllPolicyCmd(string? Id) : ICommand;

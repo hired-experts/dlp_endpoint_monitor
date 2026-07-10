@@ -70,5 +70,6 @@ namespace DlpEndpointMonitor.Commands;
 // ── Control ───────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(PingCmd))]
 [JsonSerializable(typeof(ShutdownCmd))]
+[JsonSerializable(typeof(ResetAllPolicyCmd))]
 
 internal partial class CommandsJsonContext : JsonSerializerContext { }

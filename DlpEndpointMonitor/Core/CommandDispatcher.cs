@@ -129,8 +129,9 @@ sealed class CommandDispatcher
                 case CommandType.DeviceBlacklistSet:     _usbProtection.Handle(Deserialize<DeviceBlacklistSetCmd>(rawJson));      break;
 
                 // ── Control ───────────────────────────────────────────────────
-                case CommandType.Ping:     _control.Handle(Deserialize<PingCmd>(rawJson));     break;
-                case CommandType.Shutdown: _control.Handle(Deserialize<ShutdownCmd>(rawJson)); break;
+                case CommandType.Ping:           _control.Handle(Deserialize<PingCmd>(rawJson));           break;
+                case CommandType.Shutdown:       _control.Handle(Deserialize<ShutdownCmd>(rawJson));       break;
+                case CommandType.ResetAllPolicy: _control.Handle(Deserialize<ResetAllPolicyCmd>(rawJson)); break;
             }
         }
         catch (Exception ex)

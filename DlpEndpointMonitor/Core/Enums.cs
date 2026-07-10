@@ -91,6 +91,7 @@ public enum CommandType
     [JsonStringEnumMemberName("clipboard_blacklist_set")]       ClipboardBlacklistSet,
     [JsonStringEnumMemberName("ping")]                   Ping,
     [JsonStringEnumMemberName("shutdown")]               Shutdown,
+    [JsonStringEnumMemberName("reset_all_policy")]       ResetAllPolicy,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<DeviceKind>))]

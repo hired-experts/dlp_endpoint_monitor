@@ -70,6 +70,7 @@ public class CommandDispatcherTests
     {
         public void Handle(PingCmd command) => recorder.Record(nameof(PingCmd), command);
         public void Handle(ShutdownCmd command) => recorder.Record(nameof(ShutdownCmd), command);
+        public void Handle(ResetAllPolicyCmd command) => recorder.Record(nameof(ResetAllPolicyCmd), command);
     }
 
     sealed class FakeClipboardProtectionHandler(CallRecorder recorder) : IClipboardProtectionHandler
