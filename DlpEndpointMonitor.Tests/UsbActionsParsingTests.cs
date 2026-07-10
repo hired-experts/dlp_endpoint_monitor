@@ -114,4 +114,25 @@ public class UsbActionsParsingTests
         Assert.Equal("C52B", parsed.Pid);
         Assert.Null(parsed.Serial);
     }
+
+    // T-USB-09: real production bug - a Bluetooth-LE HID device's own instance ID embeds a GATT
+    // service UUID right after the enumerator name ("hid#{00001812-...}_Dev_VID&..."), a SECOND
+    // "#{guid}" segment before the true trailing interface-class GUID. Truncating at the FIRST
+    // "#{" match (the old behavior) collapsed the instance ID down to just "HID", which then made
+    // every subsequent CM_Locate_DevNodeW call fail for that device - silently misclassifying a
+    // live-arriving Bluetooth mouse as a "protected internal" device and refusing to block it.
+    // Captured verbatim from a real MX Vertical BLE mouse's live WM_DEVICECHANGE arrival path.
+    [Fact]
+    public void ParseDevicePath_BleHidPathWithEmbeddedGattGuid_KeepsFullInstanceId()
+    {
+        var parsed = UsbActions.ParseDevicePath(
+            @"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b020_REV&0009_d15799812be8&Col01#9&3b0d97de&0&0000#{378de44c-56ef-11d1-bc8c-00a0c91405dd}");
+
+        Assert.NotNull(parsed);
+        Assert.Equal("046D", parsed!.Vid);
+        Assert.Equal("B020", parsed.Pid);
+        Assert.Equal(
+            @"HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b020_REV&0009_d15799812be8&Col01\9&3b0d97de&0&0000",
+            parsed.InstanceId);
+    }
 }

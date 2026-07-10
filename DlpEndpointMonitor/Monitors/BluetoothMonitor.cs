@@ -132,34 +132,17 @@ sealed class BluetoothMonitor : IDisposable
     }
 
     /// <summary>
-    /// Blocks a Bluetooth device by disabling its own PnP node (reversible via
-    /// <see cref="RestoreCompliant"/>) rather than unpairing it outright. Falls back to the
-    /// old unconditional unpair (<see cref="BluetoothActions.RemovePairing"/>) only when the
-    /// node can't be found - this guarantees the device is always actually blocked, at the
-    /// cost of losing reversibility for that one unresolvable device, rather than silently
-    /// leaving a non-compliant device connected because the new lookup came up empty.
+    /// Blocks a Bluetooth device by removing its pairing (<see
+    /// cref="BluetoothActions.RemovePairing"/>) rather than disabling its PnP node. Windows
+    /// Settings' Connected/Paired indicator reads the Bluetooth pairing/link-state store, not
+    /// devnode enabled/disabled state - CM_Disable_DevNode stops HID input reaching apps but
+    /// can never change what Settings displays, only an actual unpair does. This trades away
+    /// software re-pairability: an unpaired device has no record here and cannot be restored by
+    /// <see cref="RestoreCompliant"/> when policy loosens - the user must manually re-pair it.
     /// </summary>
     void BlockDevice(string mac, DeviceKind kind, string name)
     {
-        string? instanceId = BluetoothActions.FindInstanceIdByMac(mac);
-
-        if (instanceId is null)
-        {
-            // Node not found - fall back to the old mechanism so blocking never silently no-ops.
-            var (unpaired, unpairError) = BluetoothActions.RemovePairing(mac);
-            IEvent fallbackEv = unpaired
-                ? new BluetoothDeviceBlockedEvent(mac, kind, name, EventEmitter.Ts())
-                : new BluetoothDeviceBlockFailedEvent(mac, kind, name, unpairError, EventEmitter.Ts());
-            EventEmitter.Emit(fallbackEv);
-            return;
-        }
-
-        var (ok, error) = UsbActions.DisableDevice(instanceId);
-        if (ok)
-            _disabled.Add(new DisabledDeviceRecord(instanceId, "", "", null, kind, mac));
-
-        // Node WAS found - a disable failure here is a real failure, not an unresolvable-device
-        // case, so it must NOT fall back to unpair (that would mask the real error).
+        var (ok, error) = BluetoothActions.RemovePairing(mac);
         IEvent ev = ok
             ? new BluetoothDeviceBlockedEvent(mac, kind, name, EventEmitter.Ts())
             : new BluetoothDeviceBlockFailedEvent(mac, kind, name, error, EventEmitter.Ts());

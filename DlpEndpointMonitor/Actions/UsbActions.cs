@@ -26,15 +26,26 @@ static class UsbActions
     /// Recovers the PnP device instance ID from a device-interface symbolic path.
     /// The path looks like "\\?\&lt;instance-id&gt;#{&lt;interface-class-guid&gt;}\&lt;reference&gt;"
     /// (e.g. "...#{65e8773d-...}\global", "...#{65e8773d-...}\wavemicin"). Everything
-    /// from the interface GUID onward must be dropped - including the "\reference" tail -
+    /// from the FINAL interface GUID onward must be dropped - including the "\reference" tail -
     /// then the '#' separators turned back into '\'. The previous logic only stripped a
     /// trailing "#{guid}" and left the "\reference" tail in place, producing an invalid
     /// instance ID that CM_Locate_DevNodeW rejects with CR_INVALID_DEVICE_ID (0x1E).
+    ///
+    /// Must search for the LAST "#{", not the first: a Bluetooth-LE HID device's own instance
+    /// ID embeds a GATT service UUID right after the enumerator name (e.g.
+    /// "hid#{00001812-...}_Dev_VID&...&Col01#9&.../#{378de44c-...}" - the trailing interface-
+    /// class GUID). Using the first "#{" match truncated at that embedded GATT UUID instead,
+    /// collapsing the instance ID down to just "hid" - a real production bug: a live device
+    /// arrival (WM_DEVICECHANGE, the only caller of this function with no SetupDi fallback -
+    /// see EnumerateConnected's own instance-id lookup) then failed every subsequent
+    /// CM_Locate_DevNodeW call for that device, making IsProtectedInternal/HasBluetoothAncestor
+    /// silently fall through to "no ancestor found -> internal", refusing to block a genuinely
+    /// external Bluetooth mouse that should have been blocked.
     /// </summary>
     static string ToInstanceId(string interfacePath)
     {
         string working = interfacePath.StartsWith(@"\\?\") ? interfacePath[4..] : interfacePath;
-        int guidIdx = working.IndexOf("#{", StringComparison.Ordinal);
+        int guidIdx = working.LastIndexOf("#{", StringComparison.Ordinal);
         if (guidIdx >= 0) working = working[..guidIdx];
         return working.Replace('#', '\\');
     }
@@ -188,7 +199,8 @@ static class UsbActions
     /// instance ID as an opaque group key. All interface notifications from the
     /// same physical device share this ID.
     /// Uses CM_LOCATE_DEVNODE_PHANTOM so it works for both arrival and removal events.
-    /// Returns null if the device is not locatable or has no USB ancestor.
+    /// Returns null if the device is not locatable, has no USB ancestor, or is
+    /// Bluetooth-backed (see the BTH check below) - never the shared Bluetooth radio's ID.
     /// </summary>
     public static string? GetGroupId(string instanceId)
     {
@@ -203,6 +215,18 @@ static class UsbActions
             if (cr != NativeMethods.CR_SUCCESS) break;
 
             string id = sb.ToString();
+
+            // A Bluetooth-backed HID device's ancestor walk (BTHLEDEVICE -> BTHLE -> BTH\MS_BTHLE)
+            // eventually reaches the shared Bluetooth radio's OWN "USB\..." node, since the radio
+            // itself commonly sits on the USB bus. Returning that as this device's "group" would
+            // silently merge its block/allow decision with the radio's own (harmless, never
+            // blacklisted) USB interface - stop here instead, same as HasBluetoothAncestor's own
+            // walk, so a Bluetooth peripheral never inherits a group from an unrelated device that
+            // happens to share the same physical radio. Real production bug: a kind=mouse blacklist
+            // entry never matched a BLE mouse because its group resolved to the radio's own
+            // kind=Bluetooth interface, which is never blacklisted.
+            if (id.StartsWith("BTH", StringComparison.OrdinalIgnoreCase))
+                return null;
 
             // The physical USB device node always starts with "USB\"
             if (id.StartsWith("USB\\", StringComparison.OrdinalIgnoreCase))
@@ -292,7 +316,11 @@ static class UsbActions
     // Bluetooth origin is on a parent node - so we walk the tree.
     public static bool HasBluetoothAncestor(string instanceId)
     {
-        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+        // PHANTOM (not NORMAL) like GetGroupId: BLE peripherals route through an intermediate
+        // BTHLEDEVICE/GATT-service node that can be phantom/not-currently-present at query time.
+        // NORMAL mode fails to even locate such a node, silently making this report "no ancestor"
+        // for exactly the wireless devices it most needs to protect from an internal-USB misclassify.
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_PHANTOM);
         if (cr != NativeMethods.CR_SUCCESS) return false;
 
         for (int depth = 0; depth < 12; depth++)
@@ -321,7 +349,11 @@ static class UsbActions
     /// </summary>
     public static string? GetBluetoothDeviceNode(string instanceId)
     {
-        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+        // PHANTOM (not NORMAL) like GetGroupId: BLE peripherals route through an intermediate
+        // BTHLEDEVICE/GATT-service node that can be phantom/not-currently-present at query time.
+        // NORMAL mode fails to even locate such a node, silently making this return null and
+        // dropping the Bluetooth-node disable path for exactly the devices that most need it.
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint current, instanceId, NativeMethods.CM_LOCATE_DEVNODE_PHANTOM);
         if (cr != NativeMethods.CR_SUCCESS) return null;
 
         for (int depth = 0; depth < 12; depth++)

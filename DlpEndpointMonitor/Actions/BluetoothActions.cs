@@ -123,57 +123,6 @@ static class BluetoothActions
         }
     }
 
-    // ── PnP node resolution ───────────────────────────────────────────────────
-
-    /// <summary>
-    /// Finds the PnP instance ID of a Bluetooth peripheral's own device node for a given MAC,
-    /// so it can be disabled/enabled via <see cref="UsbActions.DisableDevice"/>/<see
-    /// cref="UsbActions.EnableDevice"/> instead of unpaired. Walks the BTHENUM (classic) and
-    /// BTHLE (BLE - NOT BTHLEDEVICE, which is one level too shallow, a GATT-service child of
-    /// the true peripheral node; see <see cref="UsbActions.GetBluetoothDeviceNode"/>'s doc
-    /// comment) enumerator branches directly via a device-CLASS-agnostic enumeration
-    /// (SetupDiGetClassDevsByEnumerator + SetupDiEnumDeviceInfo - device NODES, not
-    /// interfaces), since the classic Bluetooth API this file otherwise uses
-    /// (BluetoothFindFirstDevice/BluetoothFindNextDevice) never exposes a PnP instance ID,
-    /// only a MAC address. Returns null if no matching node is found under either branch -
-    /// the caller falls back to <see cref="RemovePairing"/> in that case so blocking never
-    /// silently no-ops for a device this resolution can't find.
-    /// </summary>
-    public static string? FindInstanceIdByMac(string targetMac)
-    {
-        foreach (var (enumerator, extractMac) in new (string Enumerator, Func<string, string?> ExtractMac)[]
-        {
-            ("BTHENUM", ParseMacFromPath), // reuses the existing, proven classic-format regex
-            ("BTHLE",   id => _bleTopLevelMac.Match(id) is { Success: true } m ? FormatHexMac(m.Groups[1].Value) : null),
-        })
-        {
-            IntPtr devInfo = NativeMethods.SetupDiGetClassDevsByEnumerator(
-                IntPtr.Zero, enumerator, IntPtr.Zero,
-                NativeMethods.DIGCF_PRESENT | NativeMethods.DIGCF_ALLCLASSES);
-            if (devInfo == NativeMethods.INVALID_HANDLE_VALUE) continue;
-
-            try
-            {
-                for (uint idx = 0; ; idx++)
-                {
-                    var devInfoData = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
-                    if (!NativeMethods.SetupDiEnumDeviceInfo(devInfo, idx, ref devInfoData))
-                        break; // ERROR_NO_MORE_ITEMS
-
-                    string? instanceId = UsbActions.GetDeviceInstanceId(devInfo, ref devInfoData);
-                    if (instanceId is not null
-                        && targetMac.Equals(extractMac(instanceId), StringComparison.OrdinalIgnoreCase))
-                        return instanceId;
-                }
-            }
-            finally
-            {
-                NativeMethods.SetupDiDestroyDeviceInfoList(devInfo);
-            }
-        }
-        return null;
-    }
-
     // ── Startup enumeration ───────────────────────────────────────────────────
 
     public record BtDevice(string Mac, DeviceKind Kind, string Name);

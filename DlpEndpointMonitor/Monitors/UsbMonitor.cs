@@ -267,15 +267,29 @@ sealed class UsbMonitor : IDisposable
         bool    ok;
         string? error;
 
-        // Bluetooth-backed HID (BLE/classic): disable the device's own BTHLEDEVICE/BTHENUM node,
-        // NOT the HID leaf. Vendor software (e.g. Logitech Options) re-enables the leaf, and the
-        // device's "USB ancestor" is the shared Bluetooth radio, which must never be disabled.
-        // This is a plain CM_Disable of that one peripheral node - reversible, tracked, no unpair.
+        // Bluetooth-backed HID (BLE/classic): unpair rather than disable the device's own
+        // BTHLEDEVICE/BTHENUM node. Windows Settings' Connected/Paired indicator reads the
+        // Bluetooth pairing/link-state store, not devnode enabled/disabled state -
+        // CM_Disable_DevNode stops HID input reaching apps but never changes what Settings
+        // shows, only an actual unpair does. This is not tracked in _disabled and cannot be
+        // auto-restored by RestoreCompliant - the user must manually re-pair the device.
         string? btNode = UsbActions.GetBluetoothDeviceNode(parsed.InstanceId);
         if (btNode is not null)
         {
-            (ok, error) = UsbActions.DisableDevice(btNode);
-            if (ok) disabledId = btNode;
+            string? btMac = BluetoothActions.ParseMacFromPath(btNode);
+            if (btMac is not null)
+            {
+                (ok, error) = BluetoothActions.RemovePairing(btMac);
+                // No disabledId - nothing to restore once unpaired.
+            }
+            else
+            {
+                // Should not normally happen (GetBluetoothDeviceNode only returns BTHENUM/BTHLE
+                // nodes, which ParseMacFromPath is built to parse) - fall back to disable so
+                // blocking never silently no-ops for a node whose MAC we failed to extract.
+                (ok, error) = UsbActions.DisableDevice(btNode);
+                if (ok) disabledId = btNode;
+            }
             // No USB-group / eject fallback for Bluetooth - both would target the radio.
         }
         else
