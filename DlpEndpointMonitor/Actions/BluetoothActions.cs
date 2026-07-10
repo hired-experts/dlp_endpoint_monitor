@@ -123,6 +123,44 @@ static class BluetoothActions
         }
     }
 
+    /// <summary>
+    /// Tries <see cref="RemovePairing"/> against each candidate MAC in
+    /// <see cref="UsbActions.GetBluetoothPairingCandidates"/> order, stopping at the first
+    /// success. See that method's doc comment for why more than one candidate can legitimately
+    /// exist for the same physical peripheral. Kind-agnostic by construction - it operates
+    /// purely on addresses, never on DeviceKind, so it applies uniformly to a Bluetooth mouse,
+    /// keyboard, audio device, or generic HID/dongle alike.
+    /// </summary>
+    public static (bool ok, string? error) RemovePairingAny(IReadOnlyList<string> macCandidates) =>
+        TryCandidatesInOrder(macCandidates, RemovePairing);
+
+    /// <summary>
+    /// Pure retry-order/aggregation logic, factored out of <see cref="RemovePairingAny"/> so it
+    /// is unit-testable independent of the real BluetoothRemoveDevice P/Invoke call (see
+    /// DlpEndpointMonitor.Tests/BluetoothActionsParsingTests.cs) - this project has no hardware
+    /// to actually exercise RemovePairing itself in a test. Internal rather than private so the
+    /// test project (InternalsVisibleTo) can call it directly.
+    /// </summary>
+    internal static (bool ok, string? error) TryCandidatesInOrder(
+        IReadOnlyList<string> macCandidates,
+        Func<string, (bool ok, string? error)> tryRemovePairing)
+    {
+        if (macCandidates.Count == 0)
+            return (false, "no candidate Bluetooth address to unpair");
+
+        var errors = new List<string>();
+        foreach (string mac in macCandidates)
+        {
+            var (ok, error) = tryRemovePairing(mac);
+            if (ok) return (true, null);
+            errors.Add($"{mac}: {error}");
+        }
+
+        return (false,
+            $"BluetoothRemoveDevice failed for all {macCandidates.Count} candidate address(es) - " +
+            string.Join("; ", errors));
+    }
+
     // ── Startup enumeration ───────────────────────────────────────────────────
 
     public record BtDevice(string Mac, DeviceKind Kind, string Name);

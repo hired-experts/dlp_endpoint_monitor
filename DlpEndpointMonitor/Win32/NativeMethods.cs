@@ -247,6 +247,16 @@ static class NativeMethods
     [DllImport("cfgmgr32.dll")]
     public static extern uint CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
 
+    // First-child / next-sibling pair used together to enumerate all children of a devnode
+    // (CM_Get_Child once, then CM_Get_Sibling repeatedly) - confirmed signature/usage pattern
+    // via learn.microsoft.com's CM_Get_Child/CM_Get_Sibling reference pages. ulFlags is
+    // documented "Not used, must be zero" for both, same as CM_Get_Parent above.
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Get_Child(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    public static extern uint CM_Get_Sibling(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     public static extern uint CM_Get_Device_IDW(
         uint          dnDevInst,

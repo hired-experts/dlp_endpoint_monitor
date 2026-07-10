@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Pipes;
+using System.Text;
 using System.Text.Json;
 using DlpEndpointMonitor.Actions;
 
@@ -33,6 +34,16 @@ static class BluetoothCompanionRelay
     // Only one command exists; keeping the wire format a single literal word avoids a parser.
     const string EnumerateCommand = "enumerate";
 
+    // A StreamReader and StreamWriter wrapping the SAME InOut pipe must never both own closing
+    // it: whichever disposes first closes the pipe, and the second's Dispose (StreamWriter's
+    // always calls the underlying stream's Flush, even with nothing buffered) then throws
+    // ObjectDisposedException("Cannot access a closed pipe.") - a real bug hit in production,
+    // surfacing as repeated "Cannot access a closed pipe" errors on both this relay and
+    // DisplayCompanionRelay. Both reader and writer below are constructed with leaveOpen:true
+    // so only the explicit pipe.Dispose() (already present at each call site) ever closes it.
+    // No BOM: matches the previous default StreamWriter(Stream)/StreamReader(Stream) encoding.
+    static readonly UTF8Encoding NoBomUtf8 = new(encoderShouldEmitUTF8Identifier: false);
+
     // A primary that connects then freezes mid-command must not pin the single pipe slot forever;
     // 5s matches DisplayCompanionRelay.Server's own stalled-client bound. The command line is one
     // short word, so any wait beyond this means the client is stuck, not merely slow.
@@ -50,10 +61,16 @@ static class BluetoothCompanionRelay
         readonly CancellationTokenSource _cts = new();
         readonly Task _acceptLoop;
         readonly Func<IReadOnlyList<BluetoothActions.BtDevice>> _enumerateDevices;
+        readonly string _pipeName;
 
-        public Server(Func<IReadOnlyList<BluetoothActions.BtDevice>> enumerateDevices)
+        // pipeName defaults to the shared production PipeName - Program.cs's construction is
+        // unaffected. The override exists solely so a test can bind an isolated, uniquely-named
+        // pipe instead of colliding with an already-running companion instance on the same
+        // machine (which would otherwise answer with its own real enumeration result).
+        public Server(Func<IReadOnlyList<BluetoothActions.BtDevice>> enumerateDevices, string? pipeName = null)
         {
             _enumerateDevices = enumerateDevices;
+            _pipeName = pipeName ?? PipeName;
             _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
         }
 
@@ -67,7 +84,7 @@ static class BluetoothCompanionRelay
                     // maxNumberOfServerInstances=1: exactly one primary drives us at a time.
                     // PipeDirection.InOut because this is request (read) then reply (write).
                     pipe = new NamedPipeServerStream(
-                        PipeName, PipeDirection.InOut, 1,
+                        _pipeName, PipeDirection.InOut, 1,
                         PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
                 }
                 catch (Exception ex)
@@ -100,8 +117,8 @@ static class BluetoothCompanionRelay
 
         async Task HandleRequestAsync(NamedPipeServerStream pipe, CancellationToken token)
         {
-            using var reader = new StreamReader(pipe);
-            using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            using var reader = new StreamReader(pipe, NoBomUtf8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+            using var writer = new StreamWriter(pipe, NoBomUtf8, bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
 
             using var readTimeout = new CancellationTokenSource(ReadInactivityTimeoutMs);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, readTimeout.Token);
@@ -182,12 +199,21 @@ static class BluetoothCompanionRelay
         // dies mid-request surfaces as an empty list instead of hanging the BluetoothMonitor call.
         const int ReplyReadTimeoutMs = 5000;
 
+        readonly string _pipeName;
+
+        // pipeName defaults to the shared production PipeName - see Server's matching parameter
+        // for why a test needs to override this.
+        public Client(string? pipeName = null)
+        {
+            _pipeName = pipeName ?? PipeName;
+        }
+
         public IReadOnlyList<BluetoothActions.BtDevice> Enumerate()
         {
             NamedPipeClientStream? pipe = null;
             try
             {
-                pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+                pipe = new NamedPipeClientStream(".", _pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
 
                 var toConnect = pipe;
                 bool connected = RetryPolicy.Execute(() =>
@@ -211,8 +237,8 @@ static class BluetoothCompanionRelay
                     return Array.Empty<BluetoothActions.BtDevice>();
                 }
 
-                using var writer = new StreamWriter(pipe) { AutoFlush = true };
-                using var reader = new StreamReader(pipe);
+                using var writer = new StreamWriter(pipe, NoBomUtf8, bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
+                using var reader = new StreamReader(pipe, NoBomUtf8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
 
                 writer.WriteLine(EnumerateCommand);
 

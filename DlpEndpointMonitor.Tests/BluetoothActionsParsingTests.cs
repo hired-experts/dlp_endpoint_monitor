@@ -163,4 +163,85 @@ public class BluetoothActionsParsingTests
 
         Assert.Equal(DeviceKind.Unknown, BluetoothActions.ParseKindFromPath(path));
     }
+
+    // T-BT-14..17: TryCandidatesInOrder - the pure retry-order/aggregation logic factored out
+    // of RemovePairingAny (see UsbActions.GetBluetoothPairingCandidates for why a BLE
+    // peripheral can legitimately present more than one candidate address across reconnects).
+    // The real BluetoothRemoveDevice P/Invoke is never invoked here - a fake
+    // Func<string,(bool,string?)> stands in for it, so this covers only the ordering/stop/
+    // aggregation behavior, not whether any given address actually succeeds against real
+    // Windows Bluetooth state (see AGENTS.md 8.1 / TEST-PLAN.md section 1 for why that part is
+    // hardware-only).
+
+    // First candidate already succeeds -> stop immediately, never try the rest.
+    [Fact]
+    public void TryCandidatesInOrder_FirstCandidateSucceeds_ReturnsOkWithoutTryingRest()
+    {
+        var tried = new List<string>();
+        (bool ok, string? error) Try(string mac)
+        {
+            tried.Add(mac);
+            return (true, null);
+        }
+
+        var result = BluetoothActions.TryCandidatesInOrder(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"], Try);
+
+        Assert.True(result.ok);
+        Assert.Null(result.error);
+        Assert.Equal(["AA:BB:CC:DD:EE:01"], tried);
+    }
+
+    // Only the SECOND (older) candidate succeeds - this is the exact real-world shape the fix
+    // targets: a BLE mouse's newest reconnect address (tried first) fails, but an earlier
+    // reconnect's still-phantom sibling address matches what Windows' remembered-devices store
+    // actually has on file.
+    [Fact]
+    public void TryCandidatesInOrder_SecondCandidateSucceeds_StopsAfterSecond()
+    {
+        var tried = new List<string>();
+        (bool ok, string? error) Try(string mac)
+        {
+            tried.Add(mac);
+            return mac == "AA:BB:CC:DD:EE:02" ? (true, null) : (false, "BluetoothRemoveDevice failed: 0x00000490");
+        }
+
+        var result = BluetoothActions.TryCandidatesInOrder(
+            ["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:03"], Try);
+
+        Assert.True(result.ok);
+        Assert.Null(result.error);
+        Assert.Equal(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"], tried);
+    }
+
+    // Every candidate fails - the aggregated error must name every address tried plus its own
+    // reason, so a future real failure is diagnosable from the event log alone.
+    [Fact]
+    public void TryCandidatesInOrder_AllCandidatesFail_ReturnsAggregatedError()
+    {
+        (bool ok, string? error) Try(string mac) => (false, $"reason-for-{mac}");
+
+        var result = BluetoothActions.TryCandidatesInOrder(["AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:02"], Try);
+
+        Assert.False(result.ok);
+        Assert.NotNull(result.error);
+        Assert.Contains("AA:BB:CC:DD:EE:01", result.error);
+        Assert.Contains("reason-for-AA:BB:CC:DD:EE:01", result.error);
+        Assert.Contains("AA:BB:CC:DD:EE:02", result.error);
+        Assert.Contains("reason-for-AA:BB:CC:DD:EE:02", result.error);
+    }
+
+    // Empty candidate list (e.g. every candidate node failed to yield a parseable MAC) -> a
+    // clean, well-formed failure rather than an empty/confusing error or an exception.
+    [Fact]
+    public void TryCandidatesInOrder_NoCandidates_ReturnsCleanFailureWithoutCallingDelegate()
+    {
+        bool called = false;
+        (bool ok, string? error) Try(string mac) { called = true; return (true, null); }
+
+        var result = BluetoothActions.TryCandidatesInOrder([], Try);
+
+        Assert.False(result.ok);
+        Assert.NotNull(result.error);
+        Assert.False(called);
+    }
 }

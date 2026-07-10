@@ -376,6 +376,64 @@ static class UsbActions
     }
 
     /// <summary>
+    /// Returns every Bluetooth device-node instance ID worth trying as a pairing-removal
+    /// candidate for the peripheral currently resolving to <paramref name="instanceId"/>:
+    /// <see cref="GetBluetoothDeviceNode"/>'s own resolution first (the primary, most likely
+    /// candidate), followed by any SIBLING BTHENUM\ or BTHLE\ node under the same immediate
+    /// Bluetooth-enumerator parent (e.g. BTH\MS_BTHPORT\ for classic, BTH\MS_BTHLE\ for BLE).
+    /// Returns an empty list when the device is not Bluetooth-backed at all (mirrors
+    /// GetBluetoothDeviceNode returning null).
+    ///
+    /// Exists because a BLE peripheral is permitted to regenerate its Resolvable Private /
+    /// Static Random address across power cycles (observed live: the same physical mouse's
+    /// PnP instance ID carried a different trailing MAC-derived hex suffix on each of three
+    /// reconnects in one session), so the address recovered from the CURRENT arrival's devnode
+    /// is not guaranteed to be the one Windows' classic "remembered devices" store - what
+    /// BluetoothRemoveDevice actually checks - still has on file. A PRIOR connection cycle's
+    /// now-phantom node for the SAME physical peripheral is exactly the kind of sibling this
+    /// walk picks up: CM_LOCATE_DEVNODE_PHANTOM keeps a devnode locatable/enumerable as a child
+    /// even once its hardware is no longer present, so an older sibling can still be found and
+    /// tried here. Trying every candidate is safe regardless of whether this theory is correct
+    /// for any given failure: BluetoothRemoveDevice against a non-matching address is a
+    /// harmless no-op returning ERROR_NOT_FOUND (0x490), never a destructive operation on the
+    /// wrong device. Order is preserved: primary node first, then siblings in
+    /// CM_Get_Child/CM_Get_Sibling enumeration order, so a normal (non-rotated) case still
+    /// tries the obviously-correct address first and stops there.
+    /// </summary>
+    public static IReadOnlyList<string> GetBluetoothPairingCandidates(string instanceId)
+    {
+        string? primary = GetBluetoothDeviceNode(instanceId);
+        if (primary is null) return Array.Empty<string>();
+
+        var result = new List<string> { primary };
+
+        uint cr = NativeMethods.CM_Locate_DevNodeW(out uint primaryNode, primary, NativeMethods.CM_LOCATE_DEVNODE_PHANTOM);
+        if (cr != NativeMethods.CR_SUCCESS) return result;
+
+        cr = NativeMethods.CM_Get_Parent(out uint parent, primaryNode, 0);
+        if (cr != NativeMethods.CR_SUCCESS) return result;
+
+        cr = NativeMethods.CM_Get_Child(out uint child, parent, 0);
+        while (cr == NativeMethods.CR_SUCCESS)
+        {
+            var sb = new StringBuilder((int)NativeMethods.MAX_DEVICE_ID_LEN + 1);
+            if (NativeMethods.CM_Get_Device_IDW(child, sb, NativeMethods.MAX_DEVICE_ID_LEN + 1, 0) == NativeMethods.CR_SUCCESS)
+            {
+                string id = sb.ToString();
+                bool isBtDeviceNode = id.StartsWith("BTHENUM\\", StringComparison.OrdinalIgnoreCase)
+                                   || id.StartsWith("BTHLE\\", StringComparison.OrdinalIgnoreCase);
+                if (isBtDeviceNode && !result.Contains(id, StringComparer.OrdinalIgnoreCase))
+                    result.Add(id);
+            }
+
+            cr = NativeMethods.CM_Get_Sibling(out uint next, child, 0);
+            child = next;
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// Bus-ancestry decision shared by <see cref="IsProtectedInternal"/> (strict input kinds)
     /// and <see cref="NetworkMonitor"/>'s own built-in-adapter guard - the machine's only
     /// network adapter is exactly as essential as its built-in keyboard: disabling it can

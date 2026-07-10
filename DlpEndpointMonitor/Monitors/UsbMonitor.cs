@@ -273,20 +273,47 @@ sealed class UsbMonitor : IDisposable
         // CM_Disable_DevNode stops HID input reaching apps but never changes what Settings
         // shows, only an actual unpair does. This is not tracked in _disabled and cannot be
         // auto-restored by RestoreCompliant - the user must manually re-pair the device.
-        string? btNode = UsbActions.GetBluetoothDeviceNode(parsed.InstanceId);
-        if (btNode is not null)
+        //
+        // MULTIPLE candidate addresses are tried, not just this one arrival's own node: a BLE
+        // peripheral (real production case - a Bluetooth LE mouse) can regenerate its address
+        // across power cycles, so the address on THIS arrival's devnode is not guaranteed to be
+        // the one Windows' remembered-devices store still has on file for the original pairing.
+        // See UsbActions.GetBluetoothPairingCandidates for the full rationale. This is
+        // kind-agnostic - candidate resolution never looks at parsed.Kind, so it applies the
+        // same way to a Bluetooth mouse, keyboard, audio device, or generic HID/dongle.
+        var btCandidateNodes = UsbActions.GetBluetoothPairingCandidates(parsed.InstanceId);
+        if (btCandidateNodes.Count > 0)
         {
-            string? btMac = BluetoothActions.ParseMacFromPath(btNode);
-            if (btMac is not null)
+            string btNode = btCandidateNodes[0]; // same primary node GetBluetoothDeviceNode would return
+            var btMacs = btCandidateNodes
+                .Select(BluetoothActions.ParseMacFromPath)
+                .Where(mac => mac is not null)
+                .Select(mac => mac!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (btMacs.Count > 0)
             {
-                (ok, error) = BluetoothActions.RemovePairing(btMac);
-                // No disabledId - nothing to restore once unpaired.
+                // Unpair first (best outcome - Windows Settings correctly shows the device
+                // gone), falling back to disabling the devnode if unpair genuinely fails, so a
+                // device is never left fully functional just because RemovePairing didn't work
+                // for it. Confirmed live on real hardware: the legacy BluetoothRemoveDevice API
+                // can fail (ERROR_NOT_FOUND) even against an address confirmed present in
+                // Windows' own remembered-devices registry - Windows Settings' own "Remove
+                // device" succeeded against the identical address where this API did not, so
+                // this is a real, expected API limitation for some Bluetooth LE peripherals, not
+                // a parsing bug - leaving the device unblocked in that case would be a silent
+                // enforcement gap, exactly what this fallback closes.
+                (ok, error, disabledId) = ResolveBluetoothBlock(
+                    () => BluetoothActions.RemovePairingAny(btMacs),
+                    () => UsbActions.DisableDevice(btNode),
+                    btNode);
             }
             else
             {
-                // Should not normally happen (GetBluetoothDeviceNode only returns BTHENUM/BTHLE
-                // nodes, which ParseMacFromPath is built to parse) - fall back to disable so
-                // blocking never silently no-ops for a node whose MAC we failed to extract.
+                // Should not normally happen (every candidate is a BTHENUM/BTHLE node, which
+                // ParseMacFromPath is built to parse) - fall back to disable so blocking never
+                // silently no-ops for a node whose MAC we failed to extract.
                 (ok, error) = UsbActions.DisableDevice(btNode);
                 if (ok) disabledId = btNode;
             }
@@ -329,6 +356,28 @@ sealed class UsbMonitor : IDisposable
             : new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, error, EventEmitter.Ts());
 
         EventEmitter.Emit(ev);
+    }
+
+    /// <summary>
+    /// Unpair-then-disable-fallback decision for a Bluetooth-backed block, factored out as pure
+    /// logic (no Win32 calls of its own) so it is unit-testable independent of the real
+    /// RemovePairing/DisableDevice P/Invoke calls - see
+    /// DlpEndpointMonitor.Tests/UsbMonitorTests.cs. <paramref name="disableNodeId"/> is returned
+    /// as the disabledId only when the disable fallback is the one that actually succeeded -
+    /// a successful unpair has nothing to restore, same as before this fallback existed.
+    /// </summary>
+    internal static (bool ok, string? error, string? disabledId) ResolveBluetoothBlock(
+        Func<(bool ok, string? error)> tryUnpair,
+        Func<(bool ok, string? error)> tryDisable,
+        string disableNodeId)
+    {
+        var (unpairOk, unpairError) = tryUnpair();
+        if (unpairOk) return (true, null, null);
+
+        var (disableOk, disableError) = tryDisable();
+        if (disableOk) return (true, null, disableNodeId);
+
+        return (false, $"unpair failed ({unpairError}); disable fallback also failed ({disableError})", null);
     }
 
     /// <summary>
