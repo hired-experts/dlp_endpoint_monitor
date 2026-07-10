@@ -144,6 +144,7 @@ C# record (`Commands/Commands.cs`), extra fields, what it replies with.
 | `device_blacklist_set` | `DeviceBlacklistSetCmd` | `entries: DeviceEntryDto[]` | `ReplyEvent` |
 | `ping` | `PingCmd` | - | `ReplyEvent` |
 | `shutdown` | `ShutdownCmd` | - | `ReplyEvent`, then `Environment.Exit(0)` |
+| `reset_all_policy` | `ResetAllPolicyCmd` | - | `ReplyEvent` |
 
 `DeviceEntryDto(vid?, pid?, serial?, mac?, kind?, label?)` is the shared shape used inside
 every `*_set` command's `entries` array.
@@ -152,6 +153,23 @@ every `*_set` command's `entries` array.
 **not** policy-aware (no whitelist/blacklist involved), unlike everything under
 "protection". Use them for one-off manual control; use whitelist/blacklist commands for
 persisted policy.
+
+`reset_all_policy` clears all four lists (device whitelist, device blacklist, clipboard
+whitelist, clipboard blacklist) in one call, handled by `WindowsControlHandler` (not by
+`WindowsUsbProtectionHandler`/`WindowsClipboardProtectionHandler`, since no single existing
+handler owns both device and clipboard state). Each list ends up in exactly the state its own
+individual `*_clear` command would leave it in - device whitelist also disables itself
+(matching `device_whitelist_clear`'s factory-reset semantics: an enabled-but-empty whitelist is
+deny-all), the other three only empty (already the loosest state for a blacklist, and for
+clipboard's independently-toggleable model). It is **additive, not a replacement** - every
+individual `*_clear` command keeps working unchanged on its own; this exists purely so a caller
+that wants everything cleared doesn't need four separate round trips. See
+`WindowsControlHandler.Handle(ResetAllPolicyCmd)` for the reconcile delegates it fires
+(`restoreDevices` covering all four device monitors, plus clipboard's own `reevaluate`). A
+standing rule (AGENTS.md "Policy list completeness") requires every future policy list to be
+wired in here too, mechanically checked by
+`DlpEndpointMonitor.Tests/WindowsControlHandlerTests.cs`'s
+`ResetAllPolicyCmd_HandlerConstructorCoversEveryPolicyListType`.
 
 ### 2.2 Events (stdout, one JSON object per line)
 
@@ -484,12 +502,61 @@ must manually re-pair it (see AGENTS.md section 7's carve-out).
 
 `UsbMonitor.BlockDevice`'s Bluetooth branch is different: it arrives via a HID *interface*
 event, which only gives an instance ID, not a MAC, so it still needs
-`UsbActions.GetBluetoothDeviceNode(parsed.InstanceId)` to find the peripheral's own PnP node
-first, then `BluetoothActions.ParseMacFromPath` to extract that node's MAC before it can call
-`RemovePairing`. In the (not normally reachable) case where a resolved node's MAC can't be
-parsed, it falls back to `UsbActions.DisableDevice` on that node so blocking never silently
-no-ops - this is a parsing-safety fallback, not a policy choice, and does not get tracked in
-`DisabledDevices` in the normal (unpair) path.
+`UsbActions.GetBluetoothPairingCandidates(parsed.InstanceId)` to find one or more MAC
+candidates for the peripheral, then `BluetoothActions.ParseMacFromPath` to extract each
+candidate node's MAC before it can call `RemovePairing`. In the (not normally reachable) case
+where NONE of the resolved candidate nodes' MACs can be parsed, it falls back to
+`UsbActions.DisableDevice` on the primary node so blocking never silently no-ops - this is a
+parsing-safety fallback, not a policy choice, and does not get tracked in `DisabledDevices` in
+the normal (unpair) path.
+
+**Why more than one candidate address was tried, and what live testing actually found (real
+production bug):** a real session's event log showed the SAME physical Bluetooth LE mouse (a
+Logitech MX Vertical) reconnect with a DIFFERENT trailing MAC-derived hex suffix on each of
+three reconnects in one session (`...BE7`, then `...BE8`, then `...BE9`), and a block attempt
+using the newest (`...BE9`) address failed with `BluetoothRemoveDevice failed: 0x00000490`
+(`ERROR_NOT_FOUND`). The initial hypothesis was that the pairing store simply didn't recognize
+that specific address (BLE peripherals are permitted to regenerate their Resolvable
+Private/Static Random address across power cycles) - `UsbActions.GetBluetoothPairingCandidates`
+was built to try every sibling `BTHENUM\`/`BTHLE\` node still enumerable (a prior connection
+cycle's now-phantom node included, via the same `CM_Get_Parent` then
+`CM_Get_Child`/`CM_Get_Sibling` walk `GetBluetoothPairingCandidates` uses), and
+`BluetoothActions.RemovePairingAny` (thin wrapper over the pure, unit-tested
+`TryCandidatesInOrder`) tries `RemovePairing` against each in order, stopping at the first
+success - safe regardless of mechanism, since a non-matching address is a harmless no-op
+(`ERROR_NOT_FOUND`), never a destructive operation on the wrong device.
+
+**Live testing on the real hardware disproved the address-rotation theory as the cause of this
+specific failure, and pinned down the real one.** `GetBluetoothPairingCandidates` found only the
+single current address (no older sibling was still enumerable - Windows does not keep them
+around) and it still failed. Directly inspecting
+`HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices` at the moment of failure
+showed the exact failing address (`d15799812be9`) WAS present as a remembered device - so the
+address was correct all along. Manually removing the same device through Windows Settings
+("Bluetooth & devices" -> Remove device) **succeeded** against that identical address. The
+conclusion: the legacy `BluetoothRemoveDevice` API (`bthprops.cpl`) itself cannot reliably unpair
+this Bluetooth LE peripheral, independent of address correctness - Windows Settings uses a
+different, almost certainly WinRT-based (`Windows.Devices.Enumeration`/
+`DeviceInformation.Pairing.UnpairAsync()`) removal path this codebase has no equivalent to
+without adding the `CsWinRT` NuGet package, which would violate this project's zero-NuGet-
+dependency constraint - a tradeoff for a human decision, not something to add speculatively.
+The candidate-retry logic is kept regardless (it is still correct and safe for the case it WAS
+designed for - a genuinely stale/rotated address - and is kind-agnostic, applying the same way
+to a Bluetooth mouse, keyboard, audio device, or generic HID/dongle), but it is not sufficient
+by itself for hardware where the legacy API fails outright.
+
+**Because of this, `UsbMonitor.BlockDevice`'s Bluetooth branch falls back to
+`UsbActions.DisableDevice` on the primary node whenever `RemovePairingAny` fails for ANY
+reason** - not only the narrow "no MAC could be parsed" case this fallback originally existed
+for. Confirmed live: leaving a device fully connected and functional just because the legacy
+unpair API doesn't support it is a real DLP enforcement gap, not an acceptable degraded mode.
+The decision (unpair first for the cosmetically-correct Settings result when it works, disable
+as a guaranteed fallback when it doesn't) is factored into
+`UsbMonitor.ResolveBluetoothBlock(tryUnpair, tryDisable, disableNodeId)` - pure logic, unit
+tested independent of the real Win32 calls (`DlpEndpointMonitor.Tests/UsbMonitorTests.cs`). A
+device blocked via the disable fallback IS tracked in `DisabledDevices` and CAN be
+auto-restored by `RestoreCompliant` (unlike a successful unpair) - same as any other
+disable-based block.
 
 **Verified BLE device tree is three levels deep, one more than classic Bluetooth** (confirmed
 live via `Get-PnpDevice`/`Get-PnpDeviceProperty` against real hardware):
@@ -1043,6 +1110,60 @@ lines look the way they do, so a future change does not accidentally reintroduce
   the low-level keyboard hook entirely and are not interceptable this way - only a Ctrl+V keydown
   is. Also out of scope: Image and Unknown clipboard content (no text to evaluate a regex
   against) always pass through untouched regardless of policy.
+- **[fixed] `DisplayCompanionRelay`/`BluetoothCompanionRelay`'s request/reply pipes threw
+  `ObjectDisposedException("Cannot access a closed pipe.")` on a real machine, repeatedly.**
+  Both relays wrap ONE `PipeDirection.InOut` pipe with a `StreamReader` AND a `StreamWriter` per
+  request; both were constructed with the default `leaveOpen: false`, so whichever disposed
+  first (they dispose in reverse declaration order at the end of every request) closed the
+  shared pipe out from under the other - `StreamWriter.Dispose` always calls the underlying
+  stream's `Flush`, even with nothing buffered, so the second `Dispose` threw. Observed live in
+  the user's own `agent.db` event log under both `bluetooth_companion_relay` and
+  `display_companion_relay`/`monitor_policy_restore` sources. Fixed by constructing both the
+  reader and the writer with an explicit `leaveOpen: true` (a shared `NoBomUtf8` encoding field
+  preserves the previous default no-BOM behavior) at all four call sites across both files - the
+  existing explicit `pipe.Dispose()` at each call site remains the single owner that actually
+  closes the pipe. `ClipboardCompanionRelay.cs` does NOT have this shape (one-way, one reader OR
+  one writer per pipe, never both) and needed no change. Regression-covered by
+  `DlpEndpointMonitor.Tests/CompanionRelayPipeTests.cs`, which drives a real Server/Client pair
+  over the actual named-pipe transport through a 50-iteration loop (a single request/reply did
+  not reliably reproduce the bug) and asserts no `error` event is ever emitted.
+- **[fixed, root cause confirmed live] `UsbMonitor.BlockDevice`'s Bluetooth branch could leave a
+  BLE peripheral fully connected and functional when unpairing it failed.** See section 5.5's
+  subsection for the full writeup. Initially suspected as an address-rotation problem
+  (`GetBluetoothPairingCandidates`/`RemovePairingAny`/`TryCandidatesInOrder` were added to try
+  multiple candidate addresses) - live testing on the real hardware that surfaced this bug
+  disproved that theory (the failing address WAS present in Windows' own remembered-devices
+  registry) and confirmed the real cause instead: the legacy `BluetoothRemoveDevice` API cannot
+  reliably unpair this Bluetooth LE peripheral at all, even given a correct address (Windows
+  Settings' own "Remove device" succeeded against the identical address where this API did not).
+  The actual fix is `UsbMonitor.BlockDevice` now falling back to `UsbActions.DisableDevice` on
+  the primary node whenever `RemovePairingAny` fails for ANY reason (previously only a
+  can't-parse-a-MAC edge case triggered this fallback) - decision logic factored into
+  `UsbMonitor.ResolveBluetoothBlock`, unit tested in `DlpEndpointMonitor.Tests/UsbMonitorTests.cs`.
+  A device blocked via this fallback IS tracked in `DisabledDevices` and can be auto-restored,
+  unlike a successful unpair.
+- **[fixed] A `--session-companion` process was never killed either before launching a fresh one
+  OR when the primary that owns it shuts down, so it accumulated across restarts and outlived
+  uninstalls.** Confirmed live twice, from both ends: (1) a clipboard-blacklist rule that had been
+  disabled kept getting enforced, traced to an orphaned companion (its own primary long exited)
+  still running with the OLD policy loaded at its own startup; (2) after uninstalling the MSI, the
+  companion was left running with no primary process at all. Investigated across both repos:
+  neither the MSI's `ServiceControl` uninstall action, nor the agent service host's stop/
+  process-tree-kill handling, nor this binary's own shutdown paths, ever targeted the companion -
+  it lives in a different Windows session via `CreateProcessAsUser`, not a normal process-tree
+  child a tree-kill would reach. Windows allows multiple processes to each independently register
+  `WM_CLIPBOARDUPDATE`/`WH_KEYBOARD_LL`, so an orphan keeps hooking and enforcing whatever policy
+  it started with, right alongside (or after) the primary that owned it is gone, with no error or
+  visible sign anything is wrong. Fixed with one helper used at both ends:
+  `SessionActions.TerminateCompanionProcesses(sessionId, exePath)` finds any other process at the
+  same exe path running in the target session (excluding this process itself) and kills it -
+  best-effort (a failure to enumerate/kill one leftover must never block the caller's next step).
+  `Program.cs` calls it immediately before `LaunchIntoSession` (so a restart replaces rather than
+  accumulates), and a `stopCompanion` delegate - set when the companion is launched, closing over
+  that exact session/exePath - is called from BOTH this process's own shutdown routes: the
+  Ctrl+Break/cancellation `finally` block, and `WindowsControlHandler.Handle(ShutdownCmd)` before
+  `Environment.Exit(0)`. Does not cover a hard kill/crash of the primary bypassing both routes -
+  only the two shutdown paths this binary itself controls.
 
 ### Not implemented - worth flagging before relying on it
 
@@ -1093,6 +1214,16 @@ lines look the way they do, so a future change does not accidentally reintroduce
 - **No `.editorconfig` / analyzer ruleset.** Style consistency today is "match what's
   already there," not an enforced rule. If you add one, keep it additive (do not
   reformat the whole codebase in the same change).
+- **Confirmed live: the legacy `BluetoothRemoveDevice` API cannot unpair this Logitech MX
+  Vertical Bluetooth LE mouse, independent of address correctness** (section 5.5). The disable
+  fallback means the device is now actually blocked either way, but Windows Settings will only
+  show it as correctly unpaired/removed when the legacy API happens to work (classic devices,
+  or BLE devices this API does support) - for hardware like this one, Settings will keep showing
+  the device as paired even though it is functionally disabled. The only confirmed way to close
+  that cosmetic gap is the WinRT `Windows.Devices.Enumeration`/
+  `DeviceInformation.Pairing.UnpairAsync()` API, which requires adding the `CsWinRT` NuGet
+  package - a deliberate, explicit exception to this project's zero-NuGet-dependency constraint,
+  not something to add without a human decision to accept that tradeoff.
 
 ---
 
@@ -1293,6 +1424,8 @@ can carry a blank string despite the compile-time non-nullable signature.
 | Why unclassifiable devices are blocked under whitelist | `Actions/UsbActions.cs` (`ParsePartialDevice`), `Actions/DisplayActions.cs` (`ParseMonitorPath`) |
 | Bluetooth device matching/blocking/restore | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`RemovePairing`) |
 | Why `BTHLEDEVICE\` is not the Bluetooth peripheral's own node | `Actions/UsbActions.cs` (`GetBluetoothDeviceNode`), PROJECT.md section 5.5 |
+| Why a BLE unpair can need more than one candidate address, why unpair can still fail regardless, and the disable fallback | `Actions/UsbActions.cs` (`GetBluetoothPairingCandidates`), `Actions/BluetoothActions.cs` (`RemovePairingAny`, `TryCandidatesInOrder`), `Monitors/UsbMonitor.cs` (`ResolveBluetoothBlock`), PROJECT.md section 5.5 |
+| The companion-relay double-dispose fix (leaveOpen:true) | `Core/DisplayCompanionRelay.cs`, `Core/BluetoothCompanionRelay.cs`, `DlpEndpointMonitor.Tests/CompanionRelayPipeTests.cs` |
 | Display topology blocking/restore | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
 | GUID/CoD -> DeviceKind resolution | `Core/UsbKind.cs`, `Actions/BluetoothActions.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
