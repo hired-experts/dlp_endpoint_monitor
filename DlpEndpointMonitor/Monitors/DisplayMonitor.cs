@@ -11,15 +11,29 @@ sealed class DisplayMonitor : IDisposable
     readonly DeviceWhitelist  _whitelist;
     readonly DeviceBlacklist  _blacklist;
 
+    // How the two topology-mutating Win32 calls are invoked. In a real service
+    // deployment this binary may run in Session 0, which has no desktop of its own;
+    // when a companion process owns display duties these delegates route through
+    // DisplayCompanionRelay instead of calling DisplayActions directly. Program.cs
+    // decides which at construction time — there is no default, so the choice is
+    // always explicit.
+    readonly Func<(bool ok, string? error)> _disableExternalDisplays;
+    readonly Func<(bool ok, string? error)> _enableExternalDisplays;
+
     // Debounce token for WM_DISPLAYCHANGE — prevents back-to-back calls while
     // HDMI audio interfaces cycle after a SetDisplayConfig topology switch.
     CancellationTokenSource? _displayChangeCts;
 
-    public DisplayMonitor(MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist)
+    public DisplayMonitor(
+        MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist,
+        Func<(bool ok, string? error)> disableExternalDisplays,
+        Func<(bool ok, string? error)> enableExternalDisplays)
     {
         _window    = window;
         _whitelist = whitelist;
         _blacklist = blacklist;
+        _disableExternalDisplays = disableExternalDisplays;
+        _enableExternalDisplays  = enableExternalDisplays;
         _window.DeviceChanged  += OnDeviceChanged;
         _window.DisplayChanged += OnDisplayChanged;
     }
@@ -127,7 +141,7 @@ sealed class DisplayMonitor : IDisposable
 
             if (blocked > 0)
             {
-                var (ok, error) = DisplayActions.DisableExternalDisplays();
+                var (ok, error) = _disableExternalDisplays();
                 if (!ok) EventEmitter.EmitError("monitor_policy_apply", error ?? "DisableExternalDisplays failed");
             }
 
@@ -153,7 +167,7 @@ sealed class DisplayMonitor : IDisposable
 
             if (!anyBlocked)
             {
-                var (ok, error) = DisplayActions.EnableExternalDisplays();
+                var (ok, error) = _enableExternalDisplays();
                 if (ok)
                     EventEmitter.EmitInfo("monitor_policy_restore: external displays re-enabled");
                 else
@@ -170,7 +184,7 @@ sealed class DisplayMonitor : IDisposable
         }
     }
 
-    static async Task BlockAllExternal(ParsedDevice parsed)
+    async Task BlockAllExternal(ParsedDevice parsed)
     {
         try
         {
@@ -179,7 +193,7 @@ sealed class DisplayMonitor : IDisposable
             // appears in QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS) before we try to block it.
             await Task.Delay(1000);
 
-            var (ok, error) = DisplayActions.DisableExternalDisplays();
+            var (ok, error) = _disableExternalDisplays();
 
             string? vid = string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid;
             string? pid = string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid;

@@ -12,12 +12,24 @@ sealed class BluetoothMonitor : IDisposable
     readonly DeviceBlacklist  _blacklist;
     readonly DisabledDevices  _disabled;
 
-    public BluetoothMonitor(MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist, DisabledDevices disabled)
+    // How currently-connected Bluetooth devices are enumerated. In a real service
+    // deployment this binary may run in Session 0, where BluetoothFindFirstDevice
+    // yields nothing; when a companion process owns Bluetooth enumeration this delegate
+    // routes through it instead of calling BluetoothActions.EnumerateConnected directly.
+    // Program.cs decides which at construction time — there is no default, so the choice
+    // is always explicit.
+    readonly Func<IReadOnlyList<BluetoothActions.BtDevice>> _enumerateBluetoothDevices;
+
+    public BluetoothMonitor(
+        MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist,
+        DisabledDevices disabled,
+        Func<IReadOnlyList<BluetoothActions.BtDevice>> enumerateBluetoothDevices)
     {
         _window    = window;
         _whitelist = whitelist;
         _blacklist = blacklist;
         _disabled  = disabled;
+        _enumerateBluetoothDevices = enumerateBluetoothDevices;
         _window.DeviceChanged += OnDeviceChanged;
     }
 
@@ -70,7 +82,7 @@ sealed class BluetoothMonitor : IDisposable
     {
         try
         {
-            foreach (var device in BluetoothActions.EnumerateConnected())
+            foreach (var device in _enumerateBluetoothDevices())
                 HandleArrival(device.Mac, device.Kind, device.Name);
         }
         catch (Exception ex)
@@ -88,7 +100,7 @@ sealed class BluetoothMonitor : IDisposable
         try
         {
             int checked_ = 0, blocked = 0;
-            foreach (var device in BluetoothActions.EnumerateConnected())
+            foreach (var device in _enumerateBluetoothDevices())
             {
                 checked_++;
                 bool allowed = _whitelist.IsAllowed(device.Mac, device.Kind)

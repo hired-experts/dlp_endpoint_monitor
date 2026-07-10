@@ -430,4 +430,50 @@ public class EventEmitterTests
         using var doc = JsonDocument.Parse(writer.ToString().Trim());
         Assert.False(doc.RootElement.TryGetProperty("instanceId", out _));
     }
+
+    // T-EVT-14: RawLineSink is invoked with the exact same serialized JSON that Emit writes
+    // to stdout, so a relay (a companion process forwarding its own events into this
+    // process's stdout) can observe every locally-emitted event too. Must reset RawLineSink
+    // to null in finally - it is a static field shared across every test in this assembly.
+    [Fact]
+    public void Emit_WithRawLineSinkSet_InvokesSinkExactlyOnceWithSameJson()
+    {
+        var captured = new List<string>();
+        EventEmitter.RawLineSink = line => captured.Add(line);
+        try
+        {
+            EventEmitter.Emit(new InfoEvent("hello-relay", 1));
+        }
+        finally
+        {
+            EventEmitter.RawLineSink = null;
+        }
+
+        Assert.Single(captured);
+        using var doc = JsonDocument.Parse(captured[0]);
+        Assert.Equal("info", doc.RootElement.GetProperty("type").GetString());
+        Assert.Equal("hello-relay", doc.RootElement.GetProperty("message").GetString());
+    }
+
+    // T-EVT-15: EmitRawLine writes a pre-serialized JSON string to stdout verbatim - no
+    // re-parse/re-serialize round trip - under the same lock/flush pattern as Emit.
+    [Fact]
+    public void EmitRawLine_WritesGivenStringVerbatimPlusNewline()
+    {
+        const string json = """{"type":"info","message":"already-serialized","ts":999}""";
+
+        var originalOut = Console.Out;
+        using var writer = new StringWriter();
+        Console.SetOut(writer);
+        try
+        {
+            EventEmitter.EmitRawLine(json);
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+        }
+
+        Assert.Equal(json + Environment.NewLine, writer.ToString());
+    }
 }

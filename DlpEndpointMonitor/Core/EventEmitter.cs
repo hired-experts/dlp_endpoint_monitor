@@ -8,6 +8,11 @@ static class EventEmitter
 {
     static readonly Lock _lock = new();
 
+    // Null by default - the primary process never sets this, so its behavior is unchanged.
+    // A --session-companion instance sets it to also forward every event this process emits
+    // into its own companion relay transport, without a second stdout writer.
+    public static Action<string>? RawLineSink;
+
     public static void Emit(IEvent payload)
     {
         var typeInfo = AppJsonContext.Default.GetTypeInfo(payload.GetType());
@@ -19,6 +24,26 @@ static class EventEmitter
         lock (_lock)
         {
             Console.WriteLine(json);
+            Console.Out.Flush();
+        }
+
+        // Outside the lock so a misbehaving sink implementation that re-enters Emit/EmitError
+        // can never deadlock against itself.
+        RawLineSink?.Invoke(json);
+    }
+
+    /// <summary>
+    /// Writes an already-serialized JSON line straight to stdout, verbatim - no
+    /// deserialize/reserialize round trip. The only other place besides <see cref="Emit"/>
+    /// allowed to write to <see cref="Console.Out"/>: a companion process instance's own
+    /// EventEmitter.Emit call already produced valid JSON, and relaying it through this
+    /// process's stdout must not risk a second (potentially lossy) serialization pass.
+    /// </summary>
+    public static void EmitRawLine(string alreadySerializedJson)
+    {
+        lock (_lock)
+        {
+            Console.WriteLine(alreadySerializedJson);
             Console.Out.Flush();
         }
     }

@@ -1,10 +1,8 @@
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using DlpEndpointMonitor.AlertContracts;
-using DlpEndpointMonitor.Win32;
 
 namespace DlpEndpointMonitor.Actions;
 
@@ -48,16 +46,16 @@ static class AlertActions
         string json = JsonSerializer.Serialize(request, AlertJsonContext.Default.AlertRequest);
         string args = InitialAlertArgPrefix + Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
 
-        uint targetSession = NativeMethods.WTSGetActiveConsoleSessionId();
-        if (targetSession == unchecked((uint)-1))
+        uint? activeSession = SessionActions.GetActiveConsoleSessionId();
+        if (activeSession is not uint targetSession)
             return (false, "WTSGetActiveConsoleSessionId: no interactive session attached to the console");
 
         // Same-session fast path — the normal case when running interactively (e.g. manual
         // testing); no token duplication needed since we are already IN the target session.
-        if ((uint)Process.GetCurrentProcess().SessionId == targetSession)
+        if (SessionActions.IsRunningInSession(targetSession))
             return LaunchDirect(exePath, args);
 
-        return LaunchIntoSession(targetSession, exePath, args);
+        return SessionActions.LaunchIntoSession(targetSession, exePath, args);
     }
 
     // A minimal, client-only version of AlertHost's own PipeTransport.TrySendToOwner. It cannot
@@ -92,63 +90,6 @@ static class AlertActions
         catch (Exception ex)
         {
             return (false, $"Process.Start failed: {ex.Message}");
-        }
-    }
-
-    // Launches AlertHost.exe into a session DIFFERENT from the one this process is running in -
-    // the real deployment shape, where the main binary runs as LocalSystem in Session 0 and must
-    // reach the logged-on user's desktop in another session. Every acquired handle is released
-    // in the finally block below, regardless of which step failed.
-    static (bool ok, string? error) LaunchIntoSession(uint sessionId, string exePath, string args)
-    {
-        IntPtr userToken = IntPtr.Zero;
-        IntPtr primaryToken = IntPtr.Zero;
-        IntPtr environment = IntPtr.Zero;
-        PROCESS_INFORMATION procInfo = default;
-
-        try
-        {
-            if (!NativeMethods.WTSQueryUserToken(sessionId, out userToken))
-                return (false, $"WTSQueryUserToken failed: 0x{Marshal.GetLastWin32Error():X}");
-
-            if (!NativeMethods.DuplicateTokenEx(
-                    userToken, NativeMethods.MAXIMUM_ALLOWED, IntPtr.Zero,
-                    NativeMethods.SECURITY_IMPERSONATION_LEVEL, NativeMethods.TOKEN_TYPE_PRIMARY,
-                    out primaryToken))
-                return (false, $"DuplicateTokenEx failed: 0x{Marshal.GetLastWin32Error():X}");
-
-            if (!NativeMethods.CreateEnvironmentBlock(out environment, primaryToken, false))
-                return (false, $"CreateEnvironmentBlock failed: 0x{Marshal.GetLastWin32Error():X}");
-
-            var startupInfo = new STARTUPINFO
-            {
-                cb = Marshal.SizeOf<STARTUPINFO>(),
-                // Without this, CreateProcessAsUser creates the process on a non-interactive
-                // window station and its window is never visible to the user - the single most
-                // common real-world bug in this exact pattern.
-                lpDesktop = "winsta0\\default",
-            };
-
-            // CreateProcessW may write into this buffer, so it must be a mutable StringBuilder,
-            // never a plain immutable string - a real, documented Win32 marshaling hazard.
-            var commandLine = new StringBuilder($"\"{exePath}\" {args}");
-
-            bool created = NativeMethods.CreateProcessAsUser(
-                primaryToken, null, commandLine, IntPtr.Zero, IntPtr.Zero, false,
-                NativeMethods.CREATE_UNICODE_ENVIRONMENT, environment, null,
-                ref startupInfo, out procInfo);
-
-            return created
-                ? (true, null)
-                : (false, $"CreateProcessAsUser failed: 0x{Marshal.GetLastWin32Error():X}");
-        }
-        finally
-        {
-            if (procInfo.hThread != IntPtr.Zero) NativeMethods.CloseHandle(procInfo.hThread);
-            if (procInfo.hProcess != IntPtr.Zero) NativeMethods.CloseHandle(procInfo.hProcess);
-            if (environment != IntPtr.Zero) NativeMethods.DestroyEnvironmentBlock(environment);
-            if (primaryToken != IntPtr.Zero) NativeMethods.CloseHandle(primaryToken);
-            if (userToken != IntPtr.Zero) NativeMethods.CloseHandle(userToken);
         }
     }
 }

@@ -1,4 +1,5 @@
-﻿using DlpEndpointMonitor.Core;
+using DlpEndpointMonitor.Actions;
+using DlpEndpointMonitor.Core;
 using DlpEndpointMonitor.Handlers.Windows;
 using DlpEndpointMonitor.Monitors;
 
@@ -8,6 +9,128 @@ if (args.Contains("--schema"))
 #pragma warning disable IL2026 // SchemaExporter is intentionally reflection-based; never runs in trimmed builds.
     SchemaExporter.Export(Console.Out);
 #pragma warning restore IL2026
+    return;
+}
+
+// Clipboard/keyboard companion mode — launched BY the primary (Session-0) instance via
+// SessionActions.LaunchIntoSession into the interactive user's session, where clipboard/keyboard
+// hooks actually reach a real desktop. This instance has NO stdin link to the agent (the agent
+// only ever talks to the original primary) and deliberately runs NONE of the device monitors or
+// the CommandDispatcher — device policy stays exclusively the primary's job. It shares live
+// policy with the primary through the same %ProgramData% files and relays every event it emits
+// back to the primary's stdout over a named pipe. Checked before any device-list construction.
+if (args.Contains("--session-companion"))
+{
+    try
+    {
+        // SAME default storage location (no override) as the primary — this is what lets the
+        // companion read the identical clipboard whitelist/blacklist files the primary mutates.
+        var cbWhitelist = new ClipboardWhitelist();
+        var cbBlacklist = new ClipboardBlacklist();
+        var cbCutHint   = new ClipboardOperationHint();
+
+        // Forward every event this companion emits to the primary's stdout too. The companion's
+        // own Console.Out output is left untouched (harmless — nobody reads a session-crossed
+        // child's stdout); RawLineSink just adds the relay hop so the agent sees these events.
+        using var relayClient = new ClipboardCompanionRelay.Client();
+        EventEmitter.RawLineSink = relayClient.WriteLine;
+
+        // This companion runs in the interactive session, so it — not the headless Session-0
+        // primary — is the process whose DisplayActions topology calls actually take effect. Host
+        // the display relay server so the primary's DisplayMonitor can route its two
+        // DisableExternalDisplays/EnableExternalDisplays calls here for real execution. Kept alive
+        // (via using) for the companion's whole lifetime — disposed only when this process exits.
+        (bool ok, string? error) ExecuteDisplayCommand(string command) => command switch
+        {
+            "disable" => DisplayActions.DisableExternalDisplays(),
+            "enable"  => DisplayActions.EnableExternalDisplays(),
+            _         => (false, $"unknown display command: {command}"),
+        };
+        using var displayRelayServer = new DisplayCompanionRelay.Server(ExecuteDisplayCommand);
+
+        // The companion runs in the interactive user's session with a real user context, so its
+        // BluetoothActions.EnumerateConnected actually sees the paired devices — the headless
+        // Session-0 primary sees none. Host the Bluetooth relay server so the primary's
+        // BluetoothMonitor can fetch the real device list from here. Kept alive (via using) for the
+        // companion's whole lifetime — disposed only when this process exits.
+        using var bluetoothRelayServer = new BluetoothCompanionRelay.Server(
+            () => BluetoothActions.EnumerateConnected().ToList());
+
+        var companionReady        = new ManualResetEventSlim(false);
+        var companionStartupFailed = false;
+
+        // Same STA / background message-pump shape as the primary thread below, but hosting ONLY
+        // the clipboard listener + keyboard hook — no USB/BT/Display/Network monitors, and nothing
+        // to EnumerateExisting (clipboard/keyboard have no pre-connected state to sweep).
+        var companionThread = new Thread(() =>
+        {
+            try
+            {
+                using var window       = new MessageWindow();
+                using var clipboardMon = new ClipboardMonitor(window, cbWhitelist, cbBlacklist, cbCutHint);
+                using var keyboardHook = new KeyboardHook(cbWhitelist, cbBlacklist, cbCutHint);
+
+                companionReady.Set();
+                EventEmitter.EmitInfo("clipboard companion ready");
+
+                MessageWindow.RunMessageLoop(); // blocks until WM_QUIT / session logoff kills us
+            }
+            catch (Exception ex)
+            {
+                companionStartupFailed = true;
+                EventEmitter.EmitError("clipboard_companion_msg_thread", ex.Message);
+                companionReady.Set(); // unblock the entry point even on failure
+            }
+        });
+        companionThread.SetApartmentState(ApartmentState.STA);
+        companionThread.IsBackground = true;
+        companionThread.Start();
+
+        companionReady.Wait();
+        if (companionStartupFailed)
+            return;
+
+        // Pick up policy changes the primary writes to the shared files. The atomic
+        // temp-file-then-rename Save() in ClipboardRuleList can raise several raw filesystem
+        // events per logical save, and Regex recompilation on Reload() is not free — so debounce:
+        // collapse a burst of events for one file into a single Reload() after a short quiet gap.
+        const int ReloadDebounceMs = 300;
+        using var whitelistReload = new Timer(_ => cbWhitelist.Reload(), null, Timeout.Infinite, Timeout.Infinite);
+        using var blacklistReload = new Timer(_ => cbBlacklist.Reload(), null, Timeout.Infinite, Timeout.Infinite);
+
+        void OnStorageChanged(object sender, FileSystemEventArgs e)
+        {
+            if (string.Equals(e.Name, "clipboard-whitelist.json", StringComparison.OrdinalIgnoreCase))
+                whitelistReload.Change(ReloadDebounceMs, Timeout.Infinite);
+            else if (string.Equals(e.Name, "clipboard-blacklist.json", StringComparison.OrdinalIgnoreCase))
+                blacklistReload.Change(ReloadDebounceMs, Timeout.Infinite);
+        }
+
+        // FileSystemWatcher throws ArgumentException if the directory doesn't exist yet - a real
+        // possibility here (fresh install, nothing ever saved yet) and the exact crash observed in
+        // production: it took the whole companion process down (caught by the outer try/catch
+        // below, which just logs and returns), silently killing display/Bluetooth relay + clipboard
+        // monitoring together, every time, with nothing to ever relaunch it afterward.
+        Directory.CreateDirectory(StorageLocation.Default);
+        using var watcher = new FileSystemWatcher(StorageLocation.Default)
+        {
+            // The rename half of the atomic save surfaces as a Renamed (new name = the json file);
+            // the write half as Changed/Created — watch all three and filter by name in the handler.
+            NotifyFilter        = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+            EnableRaisingEvents = true,
+        };
+        watcher.Changed += OnStorageChanged;
+        watcher.Created += OnStorageChanged;
+        watcher.Renamed += OnStorageChanged;
+
+        // No stdin to watch and no natural exit — block on the pump thread until this process is
+        // terminated externally (e.g. session logoff), so background threads keep the process alive.
+        companionThread.Join();
+    }
+    catch (Exception ex)
+    {
+        EventEmitter.EmitError("clipboard_companion", ex.Message);
+    }
     return;
 }
 
@@ -50,6 +173,85 @@ DisplayMonitor?   displayMonitor   = null;
 NetworkMonitor?   networkMonitor   = null;
 ClipboardMonitor? clipboardMonitor = null;
 
+// ── Clipboard/keyboard placement decision ─────────────────────────────────────
+// The clipboard listener and keyboard hook only function in an interactive session with a real
+// desktop. Under the real deployment this binary runs as LocalSystem in Session 0, which has no
+// desktop — its own hooks would watch an inert clipboard. Decide here whether THIS process can run
+// them itself, or must launch a --session-companion copy into the logged-on user's session.
+bool runClipboardLocally = true;
+ClipboardCompanionRelay.Server? relayServer = null;
+
+// How DisplayMonitor's two topology-mutating calls are invoked. Default: this process calls
+// DisplayActions directly (interactive/dev run, or no user session to cross into yet). When a
+// companion IS launched below, these are swapped for relay calls routed to that companion — the
+// only process whose SetDisplayConfig actually takes effect on the interactive desktop.
+DisplayCompanionRelay.Client? displayRelayClient = null;
+Func<(bool ok, string? error)> disableExternalDisplays = DisplayActions.DisableExternalDisplays;
+Func<(bool ok, string? error)> enableExternalDisplays  = DisplayActions.EnableExternalDisplays;
+
+// How BluetoothMonitor enumerates paired devices. Default: this process enumerates directly
+// (interactive/dev run, or no user session to cross into yet). When a companion IS launched below,
+// this is swapped for a relay call routed to that companion — the only process whose
+// BluetoothActions.EnumerateConnected sees the paired devices on the interactive desktop.
+BluetoothCompanionRelay.Client? bluetoothRelayClient = null;
+Func<IReadOnlyList<BluetoothActions.BtDevice>> enumerateBluetoothDevices =
+    () => BluetoothActions.EnumerateConnected().ToList();
+
+var activeSession = SessionActions.GetActiveConsoleSessionId();
+if (activeSession is null)
+{
+    // No user logged on yet (e.g. the lock screen before first logon). Nothing to cross into —
+    // run the hooks locally as before. Launching a companion once a user later logs on is a known
+    // limitation (not retried/polled in this pass); say so rather than going silently blind.
+    EventEmitter.EmitInfo("no interactive session yet — clipboard/keyboard protection inactive until a user logs on");
+}
+else if (SessionActions.IsRunningInSession(activeSession.Value))
+{
+    // Already inside the interactive session (manual/dev run — same fast path AlertActions.ShowAlert
+    // uses). The local hooks reach a real desktop; no companion needed.
+}
+else
+{
+    // Real Session-0 service deployment. Host the relay server FIRST so it is already listening
+    // when the companion connects, then launch a companion copy of this exe into the user's session.
+    relayServer = new ClipboardCompanionRelay.Server();
+
+    string? exePath = Environment.ProcessPath; // this process's own executable path
+    var (ok, error) = exePath is null
+        ? (false, "cannot resolve own executable path (Environment.ProcessPath was null)")
+        : SessionActions.LaunchIntoSession(activeSession.Value, exePath, "--session-companion");
+
+    if (ok)
+    {
+        // Companion now owns clipboard/keyboard exclusively — do NOT also build inert local hooks
+        // on this Session-0 desktop.
+        runClipboardLocally = false;
+
+        // The same companion hosts the display relay server; route DisplayMonitor's two topology
+        // calls through it, since a SetDisplayConfig from this Session-0 process has no visible
+        // desktop to affect. The static-method-group defaults above are replaced with relay calls.
+        displayRelayClient = new DisplayCompanionRelay.Client();
+        disableExternalDisplays = () => displayRelayClient.SendCommand("disable");
+        enableExternalDisplays  = () => displayRelayClient.SendCommand("enable");
+
+        // Same reasoning for Bluetooth enumeration: only the companion's process sees the paired
+        // devices, so route BluetoothMonitor's enumeration through the relay instead of this
+        // Session-0 process's own (empty) BluetoothActions.EnumerateConnected.
+        bluetoothRelayClient = new BluetoothCompanionRelay.Client();
+        enumerateBluetoothDevices = () => bluetoothRelayClient.Enumerate();
+
+        EventEmitter.EmitInfo("clipboard/keyboard companion launched into interactive session");
+    }
+    else
+    {
+        // Fail safe, not silent: keep the (inert-but-present) local hooks so the failure never
+        // leaves us with NO clipboard/keyboard component at all, and surface the exact reason.
+        relayServer.Dispose();
+        relayServer = null;
+        EventEmitter.EmitError("clipboard_companion_launch", error ?? "unknown failure");
+    }
+}
+
 // ── Message loop thread ───────────────────────────────────────────────────────
 // All Win32 message-based components (clipboard listener, USB notifications,
 // keyboard hook) must live on the SAME thread that runs the message pump.
@@ -61,17 +263,26 @@ var msgThread = new Thread(() =>
     {
         window           = new MessageWindow();
         usbMonitor       = new UsbMonitor(window, whitelist, blacklist, disabled);
-        bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist, disabled);
-        displayMonitor   = new DisplayMonitor(window, whitelist, blacklist);
+        bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist, disabled, enumerateBluetoothDevices);
+        displayMonitor   = new DisplayMonitor(window, whitelist, blacklist, disableExternalDisplays, enableExternalDisplays);
         networkMonitor   = new NetworkMonitor(window, whitelist, blacklist, disabled);
-        clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
 
         using var usbMon           = usbMonitor;
         using var btMon            = bluetoothMonitor;
         using var dispMon          = displayMonitor;
         using var netMon           = networkMonitor;
+
+        // Clipboard listener + keyboard hook run locally ONLY when no companion was launched
+        // (interactive session, or no session to cross into yet). Otherwise the companion owns
+        // them and these stay null. using(null) disposes to a harmless no-op.
+        KeyboardHook? keyboardHook = null;
+        if (runClipboardLocally)
+        {
+            clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
+            keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
+        }
         using var cbMon            = clipboardMonitor;
-        using var keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
+        using var kbHook           = keyboardHook;
 
         windowReady.Set(); // unblock main thread — monitors are set before this
         EventEmitter.EmitInfo("ready");
@@ -128,5 +339,8 @@ catch (OperationCanceledException) { }
 finally
 {
     window?.Stop(); // posts WM_DESTROY → message loop exits
+    relayServer?.Dispose(); // stop the companion relay listener, if one was hosted
+    displayRelayClient?.Dispose(); // release the display relay client, if one was constructed
+    bluetoothRelayClient?.Dispose(); // release the bluetooth relay client, if one was constructed
     EventEmitter.EmitInfo("shutdown");
 }

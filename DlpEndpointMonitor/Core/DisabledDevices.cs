@@ -32,6 +32,7 @@ internal sealed class DisabledDevicesState
 sealed class DisabledDevices
 {
     readonly ReaderWriterLockSlim _lock = new();
+    readonly object               _saveLock = new();
     readonly string               _storageDir;
     readonly string               _storagePath;
     DisabledDevicesState          _state = new();
@@ -83,16 +84,13 @@ sealed class DisabledDevices
     {
         try
         {
-            Directory.CreateDirectory(_storageDir);
-
             DisabledDevicesState snapshot;
             _lock.EnterReadLock();
             try   { snapshot = new DisabledDevicesState { Devices = _state.Devices.ToList() }; }
             finally { _lock.ExitReadLock(); }
 
-            string tmp = _storagePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, AppJsonContext.Default.DisabledDevicesState));
-            File.Move(tmp, _storagePath, overwrite: true);
+            AtomicFileWriter.Save(_saveLock, _storageDir, _storagePath,
+                JsonSerializer.Serialize(snapshot, AppJsonContext.Default.DisabledDevicesState));
         }
         catch (Exception ex) { EventEmitter.EmitError("disabled_devices_save", ex.Message); }
     }

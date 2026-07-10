@@ -31,6 +31,7 @@ abstract class ClipboardRuleList
     static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(250);
 
     readonly ReaderWriterLockSlim  _lock        = new();
+    readonly object                _saveLock    = new();
     readonly string                _storageDir;
     readonly string                _storagePath;
     ClipboardRuleListState         _state       = new();
@@ -192,8 +193,6 @@ abstract class ClipboardRuleList
     {
         try
         {
-            Directory.CreateDirectory(_storageDir);
-
             ClipboardRuleListState snapshot;
             _lock.EnterReadLock();
             try
@@ -206,9 +205,8 @@ abstract class ClipboardRuleList
             }
             finally { _lock.ExitReadLock(); }
 
-            string tmp = _storagePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, AppJsonContext.Default.ClipboardRuleListState));
-            File.Move(tmp, _storagePath, overwrite: true);
+            AtomicFileWriter.Save(_saveLock, _storageDir, _storagePath,
+                JsonSerializer.Serialize(snapshot, AppJsonContext.Default.ClipboardRuleListState));
         }
         catch (Exception ex)
         {
@@ -216,7 +214,15 @@ abstract class ClipboardRuleList
         }
     }
 
-    void Load()
+    void Load() => Reload();
+
+    /// <summary>
+    /// Re-reads <see cref="_storagePath"/> from disk and replaces the in-memory state and
+    /// compiled-regex cache wholesale. Called once from the constructor, and callable again at
+    /// any later time (e.g. by a FileSystemWatcher reacting to a different process instance
+    /// mutating the shared %ProgramData% storage file) to pick up that change without a restart.
+    /// </summary>
+    public void Reload()
     {
         try
         {

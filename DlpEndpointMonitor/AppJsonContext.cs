@@ -70,6 +70,9 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(BluetoothDeviceUnblockedEvent))]
 [JsonSerializable(typeof(BluetoothDeviceUnblockFailedEvent))]
 
+// ── Bluetooth companion relay (primary <-> companion enumerate reply) ──────────
+[JsonSerializable(typeof(System.Collections.Generic.List<DlpEndpointMonitor.Actions.BluetoothActions.BtDevice>))]
+
 // ── Network ───────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(NetworkDeviceConnectedEvent))]
 [JsonSerializable(typeof(NetworkDeviceDisconnectedEvent))]

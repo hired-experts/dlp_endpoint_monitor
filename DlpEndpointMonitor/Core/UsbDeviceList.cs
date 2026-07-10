@@ -19,6 +19,7 @@ abstract class UsbDeviceList
     // ── In-memory state ───────────────────────────────────────────────────────
 
     readonly ReaderWriterLockSlim _lock        = new();
+    readonly object               _saveLock    = new();
     readonly string               _storageDir;
     readonly string               _storagePath;
     UsbDeviceListState            _state       = new();
@@ -166,8 +167,6 @@ abstract class UsbDeviceList
     {
         try
         {
-            Directory.CreateDirectory(_storageDir);
-
             UsbDeviceListState snapshot;
             _lock.EnterReadLock();
             try
@@ -180,9 +179,8 @@ abstract class UsbDeviceList
             }
             finally { _lock.ExitReadLock(); }
 
-            string tmp = _storagePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, AppJsonContext.Default.UsbDeviceListState));
-            File.Move(tmp, _storagePath, overwrite: true);
+            AtomicFileWriter.Save(_saveLock, _storageDir, _storagePath,
+                JsonSerializer.Serialize(snapshot, AppJsonContext.Default.UsbDeviceListState));
         }
         catch (Exception ex)
         {

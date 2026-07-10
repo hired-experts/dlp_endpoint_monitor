@@ -550,4 +550,35 @@ public class ClipboardRuleListTests
             Assert.True(blacklist.IsBlocked(ClipboardKind.Files, @"C:\文件\机密.txt"));
         });
     }
+
+    // ── Reload() picks up an out-of-process rewrite of the shared storage file ────────────
+    // A companion process instance sharing the same %ProgramData% storage file can mutate the
+    // JSON on disk independently of this in-memory instance (a later stage wires a
+    // FileSystemWatcher to call Reload() when that happens) - Reload() must discard the old
+    // in-memory state and compiled regex cache wholesale in favor of whatever is on disk now.
+    [Fact]
+    public void Reload_PicksUpExternallyRewrittenFile()
+    {
+        WithTempDir(dir =>
+        {
+            var blacklist = new ClipboardBlacklist(dir);
+            blacklist.Add(new ClipboardRuleEntry("secret", ClipboardKind.Text));
+            blacklist.SetEnabled(true);
+
+            Assert.True(blacklist.IsBlocked(ClipboardKind.Text, "this is secret"));
+
+            // Simulate a different process instance rewriting the shared file directly,
+            // bypassing this ClipboardBlacklist object entirely.
+            string path = Path.Combine(dir, "clipboard-blacklist.json");
+            string newContent = """
+                {"enabled":true,"entries":[{"pattern":"different-word","kind":"text","label":null}]}
+                """;
+            File.WriteAllText(path, newContent);
+
+            blacklist.Reload();
+
+            Assert.False(blacklist.IsBlocked(ClipboardKind.Text, "this is secret"));
+            Assert.True(blacklist.IsBlocked(ClipboardKind.Text, "this has different-word in it"));
+        });
+    }
 }
