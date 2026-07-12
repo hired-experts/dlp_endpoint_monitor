@@ -62,7 +62,16 @@ static class EventEmitter
 }
 
 
-public interface IEvent { }
+// EventId is a convention every event record already follows (a body-initialized
+// `= EventEmitter.NewEventId()` property), promoted to a real interface member so callers can
+// read another event's own EventId back polymorphically (e.g. ClipboardContentBlockedEvent's
+// SourceEventId, correlating it to the ClipboardTextEvent/ClipboardFilesEvent reported moments
+// earlier) without a type-switch over every concrete record. Every existing IEvent already
+// declares a matching get-only `string EventId` property, so this is source-compatible.
+public interface IEvent
+{
+    string EventId { get; }
+}
 
 #region Replies
 [JsonDiscriminant(EventType.Error)]
@@ -150,17 +159,23 @@ public record ClipboardBlacklistGetEvent(string? Id, bool Ok, bool Enabled, IEnu
 
 // Reason is "blacklist_match" (MatchedPattern set to the specific pattern that matched) or
 // "whitelist_gate" (whitelist enabled, nothing matched it — MatchedPattern null, since there is
-// no single pattern responsible for an absence of a match).
+// no single pattern responsible for an absence of a match). Deliberately carries no content of
+// its own - SourceEventId is the EventId of the ClipboardTextEvent/ClipboardFilesEvent reported
+// moments earlier for the same clipboard change (ClipboardMonitor.EvaluateAndEnforce/
+// KeyboardHook.ShouldBlockPaste always emit that event first, unconditionally), so a consumer
+// wanting to know what was actually blocked joins on that id instead of this event duplicating
+// the same text/files a second time.
 [JsonDiscriminant(EventType.ClipboardContentBlocked)]
-public record ClipboardContentBlockedEvent(string Operation, ClipboardKind Kind, string Reason, string? MatchedPattern, long Ts) : IEvent
+public record ClipboardContentBlockedEvent(string Operation, ClipboardKind Kind, string Reason, string? MatchedPattern, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.ClipboardContentBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 // Emitted when the remediation action itself fails (e.g. ClipboardActions.Clear() returns false).
+// SourceEventId - see ClipboardContentBlockedEvent's own doc comment.
 [JsonDiscriminant(EventType.ClipboardContentBlockFailed)]
-public record ClipboardContentBlockFailedEvent(string Operation, ClipboardKind Kind, string? Error, long Ts) : IEvent
+public record ClipboardContentBlockFailedEvent(string Operation, ClipboardKind Kind, string? Error, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.ClipboardContentBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -182,49 +197,49 @@ public record UsbDriveDisconnectedEvent(string[] Drives, long Ts)
     : UsbDriveEvent(EventType.UsbDriveDisconnected, Drives, Ts);
 
 [JsonDiscriminant(EventType.UsbDeviceDetected)]
-public record UsbDeviceDetectedEvent(string? Vid, string? Pid, string? Serial, string DevicePath, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, long Ts) : IEvent
+public record UsbDeviceDetectedEvent(string? Vid, string? Pid, string? Serial, string DevicePath, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceDetected;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceConnected)]
-public record UsbDeviceConnectedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string DevicePath, bool Allowed, long Ts) : IEvent
+public record UsbDeviceConnectedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string DevicePath, bool Allowed, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceConnected;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceDisconnected)]
-public record UsbDeviceDisconnectedEvent(string? Vid, string? Pid, string? Serial, string DevicePath, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string? InstanceId, long Ts) : IEvent
+public record UsbDeviceDisconnectedEvent(string? Vid, string? Pid, string? Serial, string DevicePath, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string? InstanceId, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceDisconnected;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceBlocked)]
-public record UsbDeviceBlockedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, long Ts) : IEvent
+public record UsbDeviceBlockedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceBlockFailed)]
-public record UsbDeviceBlockFailedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string? Error, long Ts) : IEvent
+public record UsbDeviceBlockFailedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string? Error, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceUnblocked)]
-public record UsbDeviceUnblockedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string? GroupId, string InstanceId, long Ts) : IEvent
+public record UsbDeviceUnblockedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string? GroupId, string InstanceId, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceUnblocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceUnblockFailed)]
-public record UsbDeviceUnblockFailedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string? GroupId, string InstanceId, string? Error, long Ts) : IEvent
+public record UsbDeviceUnblockFailedEvent(string? Vid, string? Pid, string? Serial, DeviceKind Kind, string? GroupId, string InstanceId, string? Error, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceUnblockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -292,6 +307,17 @@ public record MonitorBlockedEvent(string? Vid, string? Pid, string DevicePath, l
 public record MonitorBlockFailedEvent(string? Vid, string? Pid, string DevicePath, string? Error, long Ts) : IEvent
 {
     public EventType Type => EventType.MonitorBlockFailed;
+    public string EventId { get; } = EventEmitter.NewEventId();
+}
+
+// Emitted whenever WM_DISPLAYCHANGE fires and settles (a Win+P projection-mode switch, not just a
+// physical plug/unplug) - Kind is which of the four topologies is now active, read via
+// DisplayActions.GetCurrentTopology. Distinct from MonitorConnected/Disconnected, which report a
+// single device's PnP arrival/removal, not the overall desktop topology.
+[JsonDiscriminant(EventType.MonitorProjectionChanged)]
+public record MonitorProjectionChangedEvent(DisplayTopology Kind, long Ts) : IEvent
+{
+    public EventType Type => EventType.MonitorProjectionChanged;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 #endregion

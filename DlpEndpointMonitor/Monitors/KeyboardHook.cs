@@ -132,7 +132,7 @@ sealed class KeyboardHook : IDisposable
             var (violates, reason, matchedPattern) = ClipboardMonitor.EvaluatePolicy(_whitelist, _blacklist, kind.Value, candidates);
             if (!violates) return false;
 
-            EventEmitter.Emit(new ClipboardContentBlockedEvent("paste", kind.Value, reason!, matchedPattern, EventEmitter.Ts()));
+            EventEmitter.Emit(new ClipboardContentBlockedEvent("paste", kind.Value, reason!, matchedPattern, changeEvent.EventId, EventEmitter.Ts()));
             return true;
         }
         catch

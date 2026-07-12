@@ -29,12 +29,13 @@ if (args.Contains("--session-companion"))
         var cbBlacklist = new ClipboardBlacklist();
         var cbCutHint   = new ClipboardOperationHint();
 
-        // Forward every event this companion emits to the primary's stdout too. The companion's
-        // own Console.Out output is left untouched (harmless — nobody reads a session-crossed
-        // child's stdout); RawLineSink just adds the relay hop so the agent sees these events.
-        using var relayClient = new ClipboardCompanionRelay.Client();
-        EventEmitter.RawLineSink = relayClient.WriteLine;
-
+        // Construct the two companion-HOSTED relay servers FIRST, before the blocking relayClient
+        // connect below. The primary fires its own ~2s connect retries at these servers almost
+        // immediately at startup; if relayClient's ~2s blocking connect to the PRIMARY's server sat
+        // ahead of them, it could delay these two from listening and make the primary's connects
+        // race and lose — the exact class of regression that broke display/Bluetooth relays (see the
+        // DisplayChangeRelay note on the companion thread below). Servers before any blocking client.
+        //
         // This companion runs in the interactive session, so it — not the headless Session-0
         // primary — is the process whose DisplayActions topology calls actually take effect. Host
         // the display relay server so the primary's DisplayMonitor can route its two
@@ -56,6 +57,16 @@ if (args.Contains("--session-companion"))
         using var bluetoothRelayServer = new BluetoothCompanionRelay.Server(
             () => BluetoothActions.EnumerateConnected().ToList());
 
+        // Only now — after the hosted servers are listening — connect back to the primary's
+        // ClipboardCompanionRelay.Server (a ~2s blocking connect). Deliberately NOT deferred to a
+        // Task.Run (unlike DisplayChangeRelay.Client below): RawLineSink must be set as early as
+        // possible so error events from the later companion startup steps (FileSystemWatcher setup,
+        // etc.) are actually relayed to the primary/agent instead of only reaching this
+        // session-crossed child's own unread stdout. Forward every event this companion emits to the
+        // primary's stdout too; the companion's own Console.Out output is left untouched (harmless).
+        using var relayClient = new ClipboardCompanionRelay.Client();
+        EventEmitter.RawLineSink = relayClient.WriteLine;
+
         var companionReady        = new ManualResetEventSlim(false);
         var companionStartupFailed = false;
 
@@ -72,6 +83,47 @@ if (args.Contains("--session-companion"))
 
                 companionReady.Set();
                 EventEmitter.EmitInfo("clipboard companion ready");
+
+                // Connecting to the primary's DisplayChangeRelay happens off this thread entirely,
+                // not inline here - its constructor blocks for up to ~2s, and doing that here (even
+                // AFTER displayRelayServer/bluetoothRelayServer below) would delay
+                // MessageWindow.RunMessageLoop from ever starting, meaning WM_CLIPBOARDUPDATE/
+                // keyboard-hook messages wouldn't pump during that window either. Sitting it
+                // sequentially on the entry thread BEFORE displayRelayServer/bluetoothRelayServer
+                // (as a first attempt at this fix did) was worse still: it delayed those two
+                // companion-hosted servers from ever being constructed, which made the primary's own
+                // ~2s connect retry for THEM race and lose against a companion that hadn't started
+                // listening yet - a real regression: "could not connect to companion pipe" for both
+                // display and bluetooth relays while clipboard (which doesn't depend on a
+                // companion-hosted server) worked fine. This companion's own message window lives in
+                // the interactive session, so it - not the headless Session-0 primary - is the one
+                // that actually receives WM_DISPLAYCHANGE; see
+                // DisplayMonitor.NotifyExternalDisplayChange for why WM_DEVICECHANGE alone isn't
+                // enough. Best-effort/fire-and-forget: Notify() never throws even if this connect is
+                // still in flight (or failed) when a display change happens.
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        var client = new DisplayChangeRelay.Client();
+
+                        // Mirrors "clipboard companion ready" - a positive confirmation that this
+                        // leg of the companion came up too, not just silence-means-success. A
+                        // failed (but non-throwing) connect gets an EmitError instead, matching
+                        // this file's own "never silently swallow" convention - IsConnected==false
+                        // is exactly the case a bare try/catch around the constructor cannot catch.
+                        if (client.IsConnected)
+                            EventEmitter.EmitInfo("monitor companion ready");
+                        else
+                            EventEmitter.EmitError("display_change_relay", $"could not connect to primary's display-change relay: {client.ConnectError}");
+
+                        window.DisplayChanged += () => client.Notify();
+                    }
+                    catch (Exception ex)
+                    {
+                        EventEmitter.EmitError("display_change_relay", $"failed to set up display-change relay client: {ex.Message}");
+                    }
+                });
 
                 MessageWindow.RunMessageLoop(); // blocks until WM_QUIT / session logoff kills us
             }
@@ -180,6 +232,7 @@ ClipboardMonitor? clipboardMonitor = null;
 // them itself, or must launch a --session-companion copy into the logged-on user's session.
 bool runClipboardLocally = true;
 ClipboardCompanionRelay.Server? relayServer = null;
+DisplayChangeRelay.Server? displayChangeRelayServer = null;
 
 // Set below only when a companion is actually launched, closing over the exact session/exePath
 // used for that launch. Called from this process's own shutdown path (both the Ctrl+Break/
@@ -222,6 +275,16 @@ else
     // Real Session-0 service deployment. Host the relay server FIRST so it is already listening
     // when the companion connects, then launch a companion copy of this exe into the user's session.
     relayServer = new ClipboardCompanionRelay.Server();
+
+    // displayMonitor is captured by reference and assigned later on the message-loop thread below
+    // (null-conditional here since a notification could theoretically arrive before that thread
+    // finishes starting up) — this is what lets the companion's real WM_DISPLAYCHANGE drive the
+    // primary's own compliance re-check on a pure projection switch, see DisplayMonitor's doc.
+    displayChangeRelayServer = new DisplayChangeRelay.Server(() =>
+    {
+        if (!windowReady.IsSet) return; // msgThread hasn't published displayMonitor yet - benign no-op, same happens-before gate ApplyPolicy/RestoreDevices/ReevaluateClipboard rely on
+        displayMonitor?.NotifyExternalDisplayChange();
+    });
 
     string? exePath = Environment.ProcessPath; // this process's own executable path
 
@@ -279,6 +342,8 @@ else
         // leaves us with NO clipboard/keyboard component at all, and surface the exact reason.
         relayServer.Dispose();
         relayServer = null;
+        displayChangeRelayServer.Dispose();
+        displayChangeRelayServer = null;
         EventEmitter.EmitError("clipboard_companion_launch", error ?? "unknown failure");
     }
 }
@@ -378,7 +443,10 @@ catch (OperationCanceledException) { }
 finally
 {
     window?.Stop(); // posts WM_DESTROY → message loop exits
+    if (!msgThread.Join(TimeSpan.FromSeconds(2)))
+        EventEmitter.EmitError("shutdown", "message-loop thread did not exit within 2s of WM_DESTROY");
     relayServer?.Dispose(); // stop the companion relay listener, if one was hosted
+    displayChangeRelayServer?.Dispose(); // stop the display-change-notify listener, if one was hosted
     displayRelayClient?.Dispose(); // release the display relay client, if one was constructed
     bluetoothRelayClient?.Dispose(); // release the bluetooth relay client, if one was constructed
     // Covers the Ctrl+Break/cancellation shutdown route - WindowsControlHandler's ShutdownCmd

@@ -119,6 +119,13 @@ DlpEndpointMonitor/
                               is a whole List<BtDevice> JSON array (encoded through AppJsonContext, so
                               the free-form Name is escaped and no reflection escapes trim) - see
                               section 10
+    DisplayChangeRelay.cs     newline fire-and-forget named-pipe transport, same direction as
+                              ClipboardCompanionRelay (companion -> primary): the --session-companion
+                              hosts the Client and calls Notify() on its own window's DisplayChanged
+                              event; the primary hosts the Server and calls
+                              DisplayMonitor.NotifyExternalDisplayChange() on every line received - see
+                              section 10 for why WM_DISPLAYCHANGE needed its own relay leg distinct
+                              from DisplayCompanionRelay's action-execution one
     ClipboardOperationHint.cs correlates KeyboardHook's Ctrl+X detection with ClipboardMonitor's
                               next clipboard read, so a text cut reports "cut" instead of
                               ClipboardActions.TryReadText()'s hardcoded "copy" - see section 10
@@ -750,6 +757,97 @@ what is and is not covered and why.
   the session-decision block in `Program.cs`, build BOTH delegate pairs (relay vs. direct) from the
   SAME session decision that already picks `runClipboardLocally`/`relayServer` - do not re-detect the
   session a second time. See `ai_agent_doc/PROJECT.md` section 11.
+- **The action-execution relay above does NOT fix a headless primary missing WM_DISPLAYCHANGE
+  itself - that gap needed its own, separate relay leg, confirmed by a real production report
+  ("plugging a monitor blocks it; switching projection mode on an already-connected monitor does
+  not").** `DisplayCompanionRelay` only carries the "disable"/"enable" ACTION from primary to
+  companion; the trigger for BOTH `BlockNonCompliant()` re-checks (`HandleArrival` from
+  `WM_DEVICECHANGE` and the 800ms-debounced `OnDisplayChanged` from `WM_DISPLAYCHANGE`) was still
+  read entirely from the PRIMARY's own `MessageWindow`. `WM_DEVICECHANGE` is systemwide/PnP, so
+  physical monitor plug/unplug still reached a Session-0 primary fine and blocked correctly. But
+  `WM_DISPLAYCHANGE` is a session/desktop-scoped broadcast - Session 0 has no desktop, so a
+  headless primary's window NEVER receives it, and a pure Win+P projection-mode switch on a monitor
+  that was already connected (no new PnP arrival) went completely unnoticed. `Core/DisplayChangeRelay.cs`
+  closes this the same direction as `ClipboardCompanionRelay` (companion -> primary, fire-and-forget):
+  the companion's own `MessageWindow` DOES live in the interactive session and genuinely receives
+  `WM_DISPLAYCHANGE`, so `Program.cs`'s companion branch wires `window.DisplayChanged += () =>
+  displayChangeRelayClient.Notify();`, and the primary's `DisplayChangeRelay.Server` calls
+  `DisplayMonitor.NotifyExternalDisplayChange()` - a thin public wrapper around the SAME private
+  `OnDisplayChanged()` debounce path a local WM_DISPLAYCHANGE would have used, so there is no second
+  copy of the debounce/BlockNonCompliant logic. The primary hosts the Server (constructed alongside
+  `relayServer` before `LaunchIntoSession`, same lifecycle/disposal points as the other two relays);
+  the companion is the Client. Only relevant when the primary actually runs headless with a companion
+  launched - an interactive/dev run needs no relay, since its own window already sits in the real
+  session and receives WM_DISPLAYCHANGE directly.
+- **[fixed - real production regression] Constructing `DisplayChangeRelay.Client` on the companion's
+  entry thread, sequentially BEFORE `displayRelayServer`/`bluetoothRelayServer`, starved those two
+  companion-hosted servers and broke both of them - confirmed live: "could not connect to companion
+  pipe" from both `bluetooth_companion_relay` and `monitor_policy_apply` (`display companion relay`),
+  while `clipboard companion ready` still logged fine.** The first version of the
+  `DisplayChangeRelay.Client` wiring put `using var displayChangeRelayClient =
+  new DisplayChangeRelay.Client();` in `Program.cs`'s companion branch BEFORE
+  `displayRelayServer`/`bluetoothRelayServer` were constructed and before `companionThread.Start()` -
+  its constructor blocks for up to ~2s (the same bounded connect-retry shape as
+  `ClipboardCompanionRelay.Client`). That delay pushed back the moment the companion's OWN
+  `DisplayCompanionRelay.Server`/`BluetoothCompanionRelay.Server` started listening, and the
+  PRIMARY's very first connection attempts to THEM - fired almost immediately via
+  `Task.Run(displayMonitor.BlockNonCompliant)`/`Task.Run(bluetoothMonitor.EnumerateExisting)` right
+  after `windowReady.Set()` - carry their OWN ~2s connect-retry budget, so the two races could (and
+  on a loaded/cold-starting machine, did) lose. Clipboard was unaffected because it doesn't depend on
+  any companion-hosted server. The fix: `DisplayChangeRelay.Client` construction (and the
+  `window.DisplayChanged` subscription) now happens inside a `Task.Run` INSIDE the companion thread's
+  message-pump body, AFTER `companionReady.Set()`/`EmitInfo("clipboard companion ready")` and BEFORE
+  `MessageWindow.RunMessageLoop()` - fully decoupled from both the entry thread's sequential
+  companion-hosted-server setup and the message-pump startup itself, so its own (still up to ~2s,
+  still one-shot-only, same accepted limitation as `ClipboardCompanionRelay.Client`) connect can never
+  again sit on any other component's critical path. **Lesson for any future companion-side relay
+  client**: never construct an eagerly-connecting relay `Client` sequentially before a companion-hosted
+  relay `Server` (or before `MessageWindow.RunMessageLoop()`) on the shared entry/message-pump thread -
+  give it its own `Task.Run`.
+- **A follow-up review of `Program.cs` for the same class of bug found 4 more, all fixed together
+  (none independently confirmed in production - defensive hardening, not observed regressions):**
+  (1) `ClipboardCompanionRelay.Client` - the ORIGINAL, pre-existing relay client - had the exact same
+  ordering risk the lesson above warns about: it sat before `displayRelayServer`/`bluetoothRelayServer`
+  in the companion branch. Fixed by reordering (servers constructed first); left as a still-blocking
+  construction rather than a `Task.Run`, since `EventEmitter.RawLineSink` needs to be set early enough
+  that later companion-startup errors (FileSystemWatcher setup, etc.) actually reach the primary/agent
+  instead of only the session-crossed child's own unread stdout. (2) The `Task.Run` wrapping
+  `DisplayChangeRelay.Client` (previous bullet's fix) had no try/catch - any future throw inside it
+  would have silently become an unobserved task exception with zero diagnostic trace, breaking this
+  file's own "catch, `EmitError`, keep going" convention; now wrapped. (3) The primary's
+  `DisplayChangeRelay.Server` callback (`() => displayMonitor?.NotifyExternalDisplayChange()`) read
+  `displayMonitor` - written once on `msgThread` - with no happens-before relationship to the relay's
+  own accept-loop thread, unlike `ApplyPolicy`/`RestoreDevices`/`ReevaluateClipboard` later in the same
+  file, which correctly gate on `windowReady.Wait()`. Fixed with the same gate: `if (!windowReady.IsSet)
+  return;` before touching `displayMonitor` - reuses the existing `ManualResetEventSlim` rather than
+  introducing `Volatile`/a new primitive. Worst case before the fix: a projection-change notification
+  arriving in the first instants of companion startup could be silently dropped. (4) The primary's
+  final shutdown `finally` block called `window?.Stop()` (posts `WM_DESTROY`, does not wait) then
+  immediately proceeded to dispose relay servers/clients and emit `"shutdown"`, with nothing waiting
+  for `msgThread` to actually finish unregistering its Win32 state. Fixed with a bounded
+  `msgThread.Join(TimeSpan.FromSeconds(2))` (bounded, not unbounded - a wedged monitor must never hang
+  the `shutdown` command's own reply) plus an `EmitError` if it times out.
+- **[fixed - confirmed via real MSI-installed `DlpAgent` service] `DisplayChangeRelay.Client`'s
+  connect to the primary failed with `UnauthorizedAccessException`, not a timeout - a genuine
+  cross-session pipe ACL denial, not a race.** Confirmed by reading the agent's own SQLite event
+  store (`agent.db`'s `events` table - `agent.log` only carries the agent's OWN lifecycle messages,
+  not every native-monitor event) after a real MSI install: `"could not connect to primary's
+  display-change relay: UnauthorizedAccessException: Access to the path is denied."`, while
+  `ClipboardCompanionRelay`'s identically-shaped pipe connected fine moments earlier
+  (`"clipboard companion ready"`). Both pipes are constructed with .NET's default (unspecified)
+  `PipeSecurity`, hosted by the same primary process - the default ACL that results does not
+  reliably grant the interactive-session companion's identity access when the primary runs under
+  the service account a real Windows Service install uses, unlike an ad-hoc interactive/dev run.
+  Fixed by explicitly granting `PipeAccessRights.ReadWrite` to `WellKnownSidType.AuthenticatedUserSid`
+  on `DisplayChangeRelay.Server`'s pipe, via `NamedPipeServerStreamAcl.Create(...)` - the
+  `PipeSecurity`-accepting `NamedPipeServerStream` constructor is Windows-TFM-only and unavailable
+  from this project's plain `net10.0` target, so the ACL-accepting static factory is the correct
+  cross-platform-safe way to set it. `ClipboardCompanionRelay`/`DisplayCompanionRelay`/
+  `BluetoothCompanionRelay` are NOT changed - they have not exhibited this failure - but if any of
+  them ever does, this is the same fix. This access-control widening (Authenticated Users, not a
+  narrower specific-SID grant) was confirmed with the user before applying, since it's a genuine
+  security tradeoff - mitigated by the pipe carrying only a bare fire-and-forget `"changed"` trigger
+  string, no data, no command/control surface.
 - **Bluetooth ENUMERATION crosses the same Session-0 gap, but relayed the other way from display -
   the companion produces the DATA, the primary keeps the DECISION.** `BluetoothActions.EnumerateConnected`
   (`BluetoothFindFirst`/`BluetoothFindNextDevice`) only sees paired devices from a process running
@@ -792,6 +890,69 @@ what is and is not covered and why.
   test-only pipe name (a single request/reply did not reliably reproduce the bug, and reusing
   the production pipe name risks colliding with - or, for Display, actually commanding - a real
   companion instance already running on the machine).
+- **[fixed - confirmed via real production logs, after the ACL fix above] `DisplayChangeRelay.Server`
+  copied `ClipboardCompanionRelay`'s rolling read-inactivity timeout, and it killed every connection
+  ~5s after connecting - long before a real, rare `WM_DISPLAYCHANGE` could plausibly occur.** Once the
+  ACL fix above let the companion actually connect, production logs then showed
+  `"dropping stalled relay client: no line received within timeout"` followed by the companion's next
+  `Notify()` failing with `"Pipe is broken"` - the server had already dropped a perfectly healthy,
+  silently-idle connection. Unlike `ClipboardCompanionRelay` (a steady stream of clipboard/keyboard
+  events, where prolonged silence really does mean a stalled client), this relay's entire job is to
+  sit connected and silent until a rare, possibly far-future display change happens - silence is the
+  normal, healthy state here, not a symptom. Fixed by removing the timeout entirely from
+  `ReadLinesAsync`: it now awaits `reader.ReadLineAsync(token)` with no inactivity bound, relying only
+  on the overall shutdown `token` to end the wait. Confirmed safe across companion restart/crash,
+  primary shutdown, and MSI update/uninstall: a pipe is a kernel object, so either end terminating
+  (clean or hard-killed) closes the handle and unblocks the peer's pending read via `IOException`/EOF
+  regardless of any application-level timeout - no watchdog was ever doing real work here.
+- **`DisplayMonitor.BlockNonCompliant()` - the re-check both a policy-list mutation AND
+  `DisplayChangeRelay`'s projection-mode notification run through - only ever emitted the aggregate
+  `monitor_policy_apply: checked N, blocking N` info line, never a real `monitor_blocked`/
+  `monitor_block_failed` event per non-compliant monitor.** Confirmed against real logs: many
+  `monitor_policy_apply` lines, zero `monitor_blocked` events, for an entire session where projection
+  blocking was demonstrably working. Unlike `HandleArrival`'s `BlockAllExternal` (a fresh monitor
+  arrival, which already emitted a real per-device event) and unlike `UsbMonitor`/`BluetoothMonitor`'s
+  own `BlockNonCompliant()` (which call `BlockDevice` per non-compliant device, each emitting its own
+  event), this method had no per-device audit trail at all. Fixed by collecting the non-compliant
+  monitors found during the sweep and, after the single `_disableExternalDisplays()` call, emitting
+  one `MonitorBlockedEvent`/`MonitorBlockFailedEvent` per non-compliant monitor - same shape the
+  arrival path already used. The aggregate info line is unchanged.
+- **`SourceEventId` - a new, generalized correlation field, added first to clipboard and then to USB
+  device events, with two DIFFERENT lifetime semantics under the same field name.** For clipboard
+  (`ClipboardContentBlockedEvent`/`ClipboardContentBlockFailedEvent`), the verdict event carries no
+  content of its own - unlike device events, which already self-identify via Vid/Pid/Serial/
+  InstanceId, clipboard's "content" (arbitrary text/files) has no natural key - so `SourceEventId` is
+  set to the `EventId` of the `ClipboardTextEvent`/`ClipboardFilesEvent` reported one call earlier, in
+  the SAME method (`ClipboardMonitor.EvaluateAndEnforce` for copy/cut, `KeyboardHook.ShouldBlockPaste`
+  for paste - both independently construct a change event then a verdict event; both updated). This
+  required promoting `EventId` from a convention (a `{ get; } = EventEmitter.NewEventId()` property
+  every record happened to declare) to a REAL member of the `IEvent` interface, so a polymorphic
+  `IEvent`-typed local's own `EventId` is readable without a type-switch over every concrete record -
+  source-compatible with every existing event since they all already declared a matching property.
+  For USB (`UsbDeviceConnectedEvent`/`Detected`/`Disconnected`/`Blocked`/`BlockFailed`/`Unblocked`/
+  `UnblockFailedEvent`), the semantics are broader: `SourceEventId` is the EventId of the FIRST event
+  seen for a composite device's `GroupId` in the current connect episode - every sibling interface's
+  own connect, every block, every disconnect, every unblock for that same physical device carries
+  that SAME anchor id, not a fresh one each time. `UsbMonitor` tracks this via an in-memory
+  `Dictionary<string,string>` (GroupId -> anchor EventId, under a `Lock`), populated on first sight and
+  released via `ReleaseGroupAnchorIfLastSibling` the moment no sibling interface of that group remains
+  connected (checked via a live `UsbActions.EnumerateGroupSiblings` re-enumeration, NOT a disconnect
+  counter, so it survives out-of-order/partial disconnects and ejects) - this cleanup is MANDATORY, not
+  optional, since an unbounded dictionary is exactly the kind of slow leak a multi-week/month-uptime
+  service must not accumulate. Devices with `GroupId == null` (non-composite, or Bluetooth-backed -
+  Bluetooth skips USB grouping entirely) never get an anchor; their `SourceEventId` is always null.
+  `GroupId`/`InstanceId` themselves are unchanged and still required for actual device control
+  (`DeviceDisableCmd`/`DeviceEnableCmd` still address by raw `InstanceId`) - `SourceEventId` is a
+  short, filter-friendly correlation handle layered on top, not a replacement identity.
+- **`AlertActions.LaunchDirect` leaked the `Process` object `Process.Start` returns - a native
+  process-handle leak, one per direct (same-session) alert launch.** Found via a self-directed
+  memory-flow audit of the whole codebase (everything else checked out clean - monitors, relay accept
+  loops, persisted lists, static lookup tables all correctly bounded/disposed). Low severity today
+  since `AlertActions.ShowAlert` is still not called from any `Monitors/*` (see the "Not implemented"
+  note elsewhere in this file) - but would become a real, slowly-accumulating handle leak the moment
+  alerting is wired in and fires repeatedly over weeks of uptime. Fixed with `using var process =
+  Process.Start(...)` - disposes the .NET wrapper/handle deterministically; does not kill or wait on
+  the launched child, which keeps running independently exactly as before.
 
 ---
 
@@ -808,8 +969,11 @@ what is and is not covered and why.
 | How a composite device's siblings are judged together | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
 | How Bluetooth devices are matched/blocked/restored | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`RemovePairing`) |
 | Why a BLE unpair tries multiple candidate addresses, why it can still fail, and the disable fallback | `Actions/UsbActions.cs` (`GetBluetoothPairingCandidates`), `Actions/BluetoothActions.cs` (`RemovePairingAny`, `TryCandidatesInOrder`), `Monitors/UsbMonitor.cs` (`ResolveBluetoothBlock`), `ai_agent_doc/PROJECT.md` section 5.5 |
+| What `SourceEventId` means for clipboard vs. USB, and why they're different lifetimes under one field name | `Core/EventEmitter.cs` (`ClipboardContentBlockedEvent`, `UsbDeviceConnectedEvent` etc.), `Monitors/UsbMonitor.cs` (`ResolveGroupAnchor`, `ResolveGroupAnchorCore`, `ReleaseGroupAnchorIfLastSibling`), section 10 |
 | The companion-relay double-dispose fix (`leaveOpen: true`) | `Core/DisplayCompanionRelay.cs`, `Core/BluetoothCompanionRelay.cs`, `DlpEndpointMonitor.Tests/CompanionRelayPipeTests.cs` |
 | How external displays are disabled/restored | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
+| Why a headless primary missed pure projection-mode switches, and the relay that fixes it | `Core/DisplayChangeRelay.cs`, `Monitors/DisplayMonitor.cs` (`NotifyExternalDisplayChange`), AGENTS.md section 10 |
+| What Win+P mode is currently active, and the event reporting it | `Actions/DisplayActions.cs` (`GetCurrentTopology`, `MapTopologyId`), `Monitors/DisplayMonitor.cs` (`EmitProjectionChanged`), `monitor_projection_changed` in PROJECT.md section 2.2 |
 | How network adapters are matched/blocked/restored, and how the built-in NIC is protected | `Monitors/NetworkMonitor.cs`, `Actions/UsbActions.cs` (`IsBuiltIn`) |
 | Windows interface GUID -> DeviceKind mapping | `Core/UsbKind.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |

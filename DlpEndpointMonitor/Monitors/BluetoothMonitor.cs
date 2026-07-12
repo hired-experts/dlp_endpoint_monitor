@@ -105,10 +105,10 @@ sealed class BluetoothMonitor : IDisposable
                 checked_++;
                 bool allowed = _whitelist.IsAllowed(device.Mac, device.Kind)
                             && !_blacklist.IsBlocked(device.Mac, device.Kind);
-                EventEmitter.EmitInfo($"bt_policy_apply: {device.Mac} kind={device.Kind} allowed={allowed}");
                 if (!allowed)
                 {
                     blocked++;
+                    EventEmitter.EmitInfo($"bt_policy_apply: {device.Mac} kind={device.Kind} allowed={allowed}");
                     string mac  = device.Mac;
                     DeviceKind kind = device.Kind;
                     string name = device.Name;

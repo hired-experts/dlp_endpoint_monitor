@@ -84,7 +84,9 @@ static class AlertActions
     {
         try
         {
-            Process.Start(new ProcessStartInfo(exePath, args) { UseShellExecute = false });
+            // Dispose the Process wrapper (not the child itself) so its native handle
+            // is released deterministically instead of waiting for finalization.
+            using var process = Process.Start(new ProcessStartInfo(exePath, args) { UseShellExecute = false });
             return (true, null);
         }
         catch (Exception ex)

@@ -12,6 +12,9 @@ sealed class UsbMonitor : IDisposable
     readonly DeviceBlacklist  _blacklist;
     readonly DisabledDevices  _disabled;
 
+    readonly Dictionary<string, string> _groupAnchors = new(StringComparer.OrdinalIgnoreCase);
+    readonly Lock _groupAnchorLock = new();
+
     public UsbMonitor(MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist, DisabledDevices disabled)
     {
         _window    = window;
@@ -83,9 +86,11 @@ sealed class UsbMonitor : IDisposable
                     HandleArrival(parsed);
                 else if (arrived)
                     EventEmitter.Emit(new UsbDeviceDetectedEvent(
-                        null, null, null, devicePath, usbClass, kind, classGuid, null, EventEmitter.Ts()));
+                        null, null, null, devicePath, usbClass, kind, classGuid, null, null, EventEmitter.Ts()));
                 else
-                    EventEmitter.Emit(new UsbDeviceDisconnectedEvent(
+                {
+                    string? groupId = parsed?.GroupId;
+                    var disconnectedEvent = new UsbDeviceDisconnectedEvent(
                         parsed?.Vid is "" ? null : parsed?.Vid,
                         parsed?.Pid is "" ? null : parsed?.Pid,
                         parsed?.Serial,
@@ -93,9 +98,18 @@ sealed class UsbMonitor : IDisposable
                         usbClass,
                         kind,
                         classGuid,
-                        parsed?.GroupId,
+                        groupId,
                         parsed?.InstanceId,
-                        EventEmitter.Ts()));
+                        null,
+                        EventEmitter.Ts());
+
+                    string? anchor = ResolveGroupAnchor(groupId, disconnectedEvent.EventId);
+                    if (anchor is not null)
+                        disconnectedEvent = disconnectedEvent with { SourceEventId = anchor };
+
+                    EventEmitter.Emit(disconnectedEvent);
+                    ReleaseGroupAnchorIfLastSibling(groupId);
+                }
             }
         }
         catch (Exception ex)
@@ -160,10 +174,10 @@ sealed class UsbMonitor : IDisposable
                     : _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
                         && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
 
-                EventEmitter.EmitInfo($"usb_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
                 if (!allowed)
                 {
                     blocked++;
+                    EventEmitter.EmitInfo($"usb_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
                     Task.Run(() => BlockDevice(parsed, siblings));
                 }
             }
@@ -193,12 +207,65 @@ sealed class UsbMonitor : IDisposable
         return siblings.Any(s => _whitelist.IsAllowed(s.Vid, s.Pid, s.Serial, s.Kind));
     }
 
+    /// <summary>
+    /// Get-or-establish the group-anchor EventId for <paramref name="groupId"/>: returns the
+    /// SourceEventId this caller's event should carry. Null groupId (non-composite, or
+    /// Bluetooth-backed - no anchor concept) always returns null. First sighting of a groupId
+    /// establishes <paramref name="candidateEventId"/> as its anchor and returns null (this event
+    /// IS the anchor - nothing came before it); every later sighting returns the EXISTING anchor,
+    /// ignoring candidateEventId entirely. Locked wrapper over <see cref="ResolveGroupAnchorCore"/>,
+    /// which holds the actual pure decision so it is unit-testable without a real UsbMonitor - see
+    /// DlpEndpointMonitor.Tests/UsbMonitorTests.cs.
+    /// </summary>
+    string? ResolveGroupAnchor(string? groupId, string candidateEventId)
+    {
+        lock (_groupAnchorLock)
+        {
+            return ResolveGroupAnchorCore(_groupAnchors, groupId, candidateEventId);
+        }
+    }
+
+    /// <summary>
+    /// Pure get-or-create decision for a group anchor, factored out of <see cref="ResolveGroupAnchor"/>
+    /// the same way <see cref="ResolveBluetoothBlock"/> is factored out of BlockDevice - no locking,
+    /// no Win32, just the dictionary logic, so tests can drive it against a plain Dictionary they
+    /// construct themselves. Null groupId (non-composite, or Bluetooth-backed - no anchor concept)
+    /// always returns null without touching the dictionary.
+    /// </summary>
+    internal static string? ResolveGroupAnchorCore(Dictionary<string, string> anchors, string? groupId, string candidateEventId)
+    {
+        if (groupId is null) return null;
+        if (anchors.TryGetValue(groupId, out var existing)) return existing;
+        anchors[groupId] = candidateEventId;
+        return null;
+    }
+
+    /// <summary>
+    /// Forgets a group's anchor once every sibling interface has disconnected, so a later,
+    /// unrelated device that happens to reuse a Windows-generated GroupId does not inherit a
+    /// stale anchor. MANDATORY cleanup, not optional - without it this dictionary grows
+    /// unboundedly over the process's multi-week/month uptime as different physical devices
+    /// connect and disconnect over time. Call after emitting a disconnect event.
+    /// </summary>
+    void ReleaseGroupAnchorIfLastSibling(string? groupId)
+    {
+        if (groupId is null) return;
+
+        bool anySiblingStillConnected = UsbActions.EnumerateGroupSiblings(groupId).Any();
+        if (anySiblingStillConnected) return;
+
+        lock (_groupAnchorLock)
+        {
+            _groupAnchors.Remove(groupId);
+        }
+    }
+
     void HandleArrival(ParsedDevice parsed)
     {
         bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
                     && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
 
-        EventEmitter.Emit(new UsbDeviceConnectedEvent(
+        var connectedEvent = new UsbDeviceConnectedEvent(
             string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
             string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid,
             parsed.Serial,
@@ -209,7 +276,18 @@ sealed class UsbMonitor : IDisposable
             parsed.InstanceId,
             parsed.RawPath,
             allowed,
-            EventEmitter.Ts()));
+            null,
+            EventEmitter.Ts());
+
+        // Resolve/establish the anchor using this event's own real EventId as the candidate, then
+        // fold the result back in via `with` - see the disconnect branch in OnDeviceChanged for why
+        // this two-step shape (not passed in at construction) is required to keep the anchor value
+        // equal to an EventId a consumer can actually see in the stream.
+        string? anchor = ResolveGroupAnchor(parsed.GroupId, connectedEvent.EventId);
+        if (anchor is not null)
+            connectedEvent = connectedEvent with { SourceEventId = anchor };
+
+        EventEmitter.Emit(connectedEvent);
 
         if (!allowed)
         {
@@ -225,11 +303,17 @@ sealed class UsbMonitor : IDisposable
         // the single choke point for every block path (arrival, apply, startup enum).
         if (UsbActions.IsProtectedInternal(parsed.Kind, parsed.InstanceId))
         {
-            EventEmitter.Emit(new UsbDeviceBlockFailedEvent(
+            var protectedFailedEvent = new UsbDeviceBlockFailedEvent(
                 parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind,
                 parsed.ClassGuid, parsed.GroupId, parsed.InstanceId,
                 "protected internal input device (built-in keyboard/touchpad) - refused to block",
-                EventEmitter.Ts()));
+                null, EventEmitter.Ts());
+
+            string? protectedAnchor = ResolveGroupAnchor(parsed.GroupId, protectedFailedEvent.EventId);
+            if (protectedAnchor is not null)
+                protectedFailedEvent = protectedFailedEvent with { SourceEventId = protectedAnchor };
+
+            EventEmitter.Emit(protectedFailedEvent);
             return;
         }
 
@@ -351,11 +435,23 @@ sealed class UsbMonitor : IDisposable
         if (disabledId is not null)
             _disabled.Add(new DisabledDeviceRecord(disabledId, parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind, GroupId: parsed.GroupId));
 
-        IEvent ev = ok
-            ? new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, EventEmitter.Ts())
-            : new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, error, EventEmitter.Ts());
-
-        EventEmitter.Emit(ev);
+        // Two separate branches (not a shared IEvent ternary) so each concrete record's own
+        // `with` can fold in the resolved anchor - `with` isn't available through the IEvent
+        // interface, and each type needs its own real EventId as ResolveGroupAnchor's candidate.
+        if (ok)
+        {
+            var blockedEvent = new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, null, EventEmitter.Ts());
+            string? anchor = ResolveGroupAnchor(parsed.GroupId, blockedEvent.EventId);
+            if (anchor is not null) blockedEvent = blockedEvent with { SourceEventId = anchor };
+            EventEmitter.Emit(blockedEvent);
+        }
+        else
+        {
+            var failedEvent = new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, error, null, EventEmitter.Ts());
+            string? anchor = ResolveGroupAnchor(parsed.GroupId, failedEvent.EventId);
+            if (anchor is not null) failedEvent = failedEvent with { SourceEventId = anchor };
+            EventEmitter.Emit(failedEvent);
+        }
     }
 
     /// <summary>
@@ -456,7 +552,15 @@ sealed class UsbMonitor : IDisposable
                 {
                     _disabled.Remove(d.InstanceId);
                     restored++;
-                    EventEmitter.Emit(new UsbDeviceUnblockedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, EventEmitter.Ts()));
+
+                    // No anchor may exist here (in-memory only - a process restart since the
+                    // anchor was established, or an eject-while-disabled, both lose it); resolving
+                    // establishes a fresh one in that case, an accepted degradation (this event's
+                    // own SourceEventId is then null, same as any first-sighting establisher).
+                    var unblockedEvent = new UsbDeviceUnblockedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, null, EventEmitter.Ts());
+                    string? anchor = ResolveGroupAnchor(d.GroupId, unblockedEvent.EventId);
+                    if (anchor is not null) unblockedEvent = unblockedEvent with { SourceEventId = anchor };
+                    EventEmitter.Emit(unblockedEvent);
                 }
                 else if (error is not null && error.Contains("Locate", StringComparison.Ordinal))
                 {
@@ -469,7 +573,11 @@ sealed class UsbMonitor : IDisposable
                     // Present but re-enable FAILED: keep the record so the next restore retries
                     // it (do NOT orphan a still-disabled device), and surface the failure.
                     stillBlocked++;
-                    EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, error, EventEmitter.Ts()));
+
+                    var unblockFailedEvent = new UsbDeviceUnblockFailedEvent(d.Vid, d.Pid, d.Serial, d.Kind, d.GroupId, d.InstanceId, error, null, EventEmitter.Ts());
+                    string? anchor = ResolveGroupAnchor(d.GroupId, unblockFailedEvent.EventId);
+                    if (anchor is not null) unblockFailedEvent = unblockFailedEvent with { SourceEventId = anchor };
+                    EventEmitter.Emit(unblockFailedEvent);
                 }
             }
             EventEmitter.EmitInfo($"usb_policy_restore: restored {restored}, still-blocked {stillBlocked}");

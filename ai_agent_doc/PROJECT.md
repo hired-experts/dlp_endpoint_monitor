@@ -183,16 +183,18 @@ Every event has a `type` field (the JSON discriminant). Table: `type` value, C# 
 | `reply` | `ReplyEvent` | `id?, ok, error?` | Default ack for most commands |
 | `clipboard_read` | `ClipboardReadEvent` | `id?, ok, content?` | Reply to `clipboard_read` |
 | `clipboard_change` (kind `text`/`files`/`image`/`unknown`) | `ClipboardTextEvent` / `ClipboardFilesEvent` / `ClipboardImageEvent` / `ClipboardUnknownEvent` | `operation` ("copy"/"cut"/"paste"), content, `ts` | Unsolicited, on every `WM_CLIPBOARDUPDATE` |
+| `clipboard_content_blocked` / `clipboard_content_block_failed` | `ClipboardContentBlockedEvent` / `ClipboardContentBlockFailedEvent` | `operation, kind, reason` ("blacklist_match"/"whitelist_gate"), `matchedPattern?, sourceEventId?, error?(failed only), ts` | `sourceEventId` is the `eventId` of the `clipboard_change` reported moments earlier for the same content - this event carries no content of its own, join on that id to see what was actually blocked (section 10) |
 | `usb_drive_connected` / `usb_drive_disconnected` | `UsbDriveConnectedEvent` / `DisconnectedEvent` | `drives: string[], ts` | `DBT_DEVTYP_VOLUME` arrival/removal |
-| `usb_device_detected` | `UsbDeviceDetectedEvent` | `vid?, pid?, serial?, devicePath, usbClass?, kind, nativeClass?, groupId?, ts` | Arrival where VID/PID could not be parsed |
-| `usb_device_connected` / `usb_device_disconnected` | `UsbDeviceConnectedEvent` / `DisconnectedEvent` | `vid, pid, serial?, usbClass?, kind, nativeClass?, groupId?, devicePath, allowed(only on connect), ts` | USB device-interface arrival/removal |
-| `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, error?(failed only), ts` | After a block attempt |
-| `usb_device_unblocked` / `usb_device_unblock_failed` | `UsbDeviceUnblockedEvent` / `UnblockFailedEvent` | `vid?, pid?, serial?, kind, instanceId, error?(failed only), ts` | During `RestoreCompliant` |
+| `usb_device_detected` | `UsbDeviceDetectedEvent` | `vid?, pid?, serial?, devicePath, usbClass?, kind, nativeClass?, groupId?, sourceEventId?, ts` | Arrival where VID/PID could not be parsed |
+| `usb_device_connected` / `usb_device_disconnected` | `UsbDeviceConnectedEvent` / `DisconnectedEvent` | `vid, pid, serial?, usbClass?, kind, nativeClass?, groupId?, devicePath, allowed(only on connect), sourceEventId?, ts` | USB device-interface arrival/removal. `sourceEventId` (composite devices only) is the anchor `eventId` shared by every event for this device's `groupId` in the current connect episode (section 10) |
+| `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, sourceEventId?, error?(failed only), ts` | After a block attempt |
+| `usb_device_unblocked` / `usb_device_unblock_failed` | `UsbDeviceUnblockedEvent` / `UnblockFailedEvent` | `vid?, pid?, serial?, kind, instanceId, sourceEventId?, error?(failed only), ts` | During `RestoreCompliant` |
 | `usb_storage_status` | `UsbStorageStatusEvent` | `id?, ok, enabled` | Reply to `usb_storage_status` |
 | `device_protection_status` | `DeviceProtectionStatusEvent` | `id?, ok, mode, error?` | Reply to `device_protection_status`, also usable standalone |
 | `device_whitelist_get` / `device_blacklist_get` | `DeviceWhitelistGetEvent` / `DeviceBlacklistGetEvent` | `id?, ok, enabled, entries: WhitelistEntryDto[]` | Reply to the `_get` commands |
 | `monitor_connected` / `monitor_disconnected` | `MonitorConnectedEvent` / `DisconnectedEvent` | `vid?, pid?, devicePath, ts` | External monitor interface arrival/removal (`vid`/`pid` = EDID manufacturer/product code) |
-| `monitor_blocked` / `monitor_block_failed` | `MonitorBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, devicePath, error?(failed only), ts` | After `DisableExternalDisplays` |
+| `monitor_blocked` / `monitor_block_failed` | `MonitorBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, devicePath, error?(failed only), ts` | After `DisableExternalDisplays` - emitted both on a fresh non-compliant arrival AND per non-compliant monitor found during `BlockNonCompliant()`'s re-check (policy change or a projection-mode switch relayed via `DisplayChangeRelay`), not just arrival (section 10) |
+| `monitor_projection_changed` | `MonitorProjectionChangedEvent` | `kind ("internal"|"clone"|"extend"|"external"|"unknown"), ts` | `WM_DISPLAYCHANGE` settles (800ms debounce) - which Win+P mode is now active, read via `DisplayActions.GetCurrentTopology` |
 | `keyboard_shortcut` | `KeyboardShortcutEvent` | `action ("copy"|"cut"|"paste"|"undo"), ts` | Ctrl+C/X/V/Z detected (reporting only, never blocks the key) |
 | `bluetooth_device_connected` / `_disconnected` | `BluetoothDeviceConnectedEvent` / `DisconnectedEvent` | `mac, kind, name, allowed(connect only), ts` | Paired BT device arrival/removal |
 | `bluetooth_device_blocked` / `_block_failed` | `BluetoothDeviceBlockedEvent` / `BlockFailedEvent` | `mac, kind, name, error?(failed only), ts` | After `RemovePairing` |
@@ -608,6 +610,35 @@ fires it repeatedly while HDMI-audio interfaces cycle during a topology switch. 
 debounce token must be replaced atomically: cancel-and-dispose the previous
 `CancellationTokenSource` *before* installing the new one, in the same synchronous block -
 see section 10 for the crash this fixed.
+
+**`WM_DISPLAYCHANGE` is session/desktop-scoped, unlike `WM_DEVICECHANGE` (systemwide/PnP) -
+a headless Session-0 primary never receives it on its own message window.** This was a real
+production report: plugging in a non-compliant monitor got blocked correctly, but switching
+projection mode (Win+P) on a monitor that was *already* connected did not, because no new
+`WM_DEVICECHANGE` fires for a pure topology switch - only `WM_DISPLAYCHANGE`, which a Session-0
+window structurally cannot receive (Session 0 has no desktop at all). `DisplayCompanionRelay`
+(section 11's action-execution relay) did not fix this - it only carries the *outbound*
+"disable"/"enable" command, not the *inbound* change notification. `Core/DisplayChangeRelay.cs`
+adds the missing leg, same direction as `ClipboardCompanionRelay` (companion -> primary,
+fire-and-forget): the companion's own `MessageWindow` lives in the real interactive session and
+genuinely gets `WM_DISPLAYCHANGE`, so it forwards a bare notification to the primary, which calls
+`DisplayMonitor.NotifyExternalDisplayChange()` - a public wrapper around the exact same private
+`OnDisplayChanged()` debounce path a local broadcast would have used, so the debounce/
+re-check logic itself is not duplicated anywhere.
+
+**Every settled `WM_DISPLAYCHANGE` also emits `monitor_projection_changed` with which Win+P mode
+is now active** (`DisplayMonitor.EmitProjectionChanged`, called right before `BlockNonCompliant()`
+in the same debounce continuation - both local and relayed). The `kind` (`internal`/`clone`/
+`extend`/`external`/`unknown`) is read via `DisplayActions.GetCurrentTopology`, which calls
+`QueryDisplayConfig(QDC_DATABASE_CURRENT)` for its `currentTopologyId` out-param - the same
+identifier Windows itself uses to decide which Win+P tile is highlighted, so this is not a
+heuristic derived from path/monitor counts. This is a separate, informational event from
+`monitor_blocked`/`monitor_block_failed` - a projection change is worth reporting even when
+nothing ends up non-compliant, since the agent/dashboard otherwise has no way to learn what the
+topology changed *to*. `DisplayActions.MapTopologyId(uint)` is the pure bit-value-to-enum mapping,
+factored out for unit testing (`DlpEndpointMonitor.Tests/DisplayActionsParsingTests.cs`) - the
+Win32 `QueryDisplayConfig` call itself is not (and cannot be) unit tested, same as every other
+real-hardware CCD call in this file.
 
 **`ParseMonitorPath` no longer drops unparseable monitors.** If a monitor's interface path
 doesn't match the `DISPLAY#XXX0000` EDID pattern, it used to return `null` and the monitor
@@ -1164,6 +1195,24 @@ lines look the way they do, so a future change does not accidentally reintroduce
   Ctrl+Break/cancellation `finally` block, and `WindowsControlHandler.Handle(ShutdownCmd)` before
   `Environment.Exit(0)`. Does not cover a hard kill/crash of the primary bypassing both routes -
   only the two shutdown paths this binary itself controls.
+- **[fixed] Introducing `DisplayChangeRelay.Client` on the companion's entry thread starved the
+  two companion-hosted relay servers, breaking Bluetooth enumeration and display-topology actions.**
+  Confirmed live in the very release that added `DisplayChangeRelay`: `bluetooth_companion_relay` and
+  `monitor_policy_apply` (`display companion relay`) both logged "could not connect to companion
+  pipe", while `clipboard companion ready` logged fine. Root cause: the first cut of the wiring
+  constructed `displayChangeRelayClient` on `Program.cs`'s companion-branch entry thread BEFORE
+  `displayRelayServer`/`bluetoothRelayServer` and before `companionThread.Start()` - its constructor
+  blocks up to ~2s on a bounded connect retry (same shape as `ClipboardCompanionRelay.Client`), which
+  delayed those two companion-hosted servers from starting to listen. The PRIMARY's own first
+  connection attempts to them - fired almost immediately at startup via
+  `Task.Run(displayMonitor.BlockNonCompliant)`/`Task.Run(bluetoothMonitor.EnumerateExisting)`, each
+  with their OWN ~2s connect-retry budget - lost that race on a slower/cold-starting machine.
+  Clipboard was unaffected because it doesn't depend on any companion-hosted server. Fixed by moving
+  the `DisplayChangeRelay.Client` construction and `window.DisplayChanged` subscription into a
+  `Task.Run` inside the companion thread's own message-pump body (after `companionReady.Set()`,
+  before `MessageWindow.RunMessageLoop()`), fully decoupling it from both the entry thread's
+  sequential setup and the message-pump startup itself. See AGENTS.md section 10 for the "lesson
+  for any future companion-side relay client" this leaves behind.
 
 ### Not implemented - worth flagging before relying on it
 
@@ -1427,6 +1476,7 @@ can carry a blank string despite the compile-time non-nullable signature.
 | Why a BLE unpair can need more than one candidate address, why unpair can still fail regardless, and the disable fallback | `Actions/UsbActions.cs` (`GetBluetoothPairingCandidates`), `Actions/BluetoothActions.cs` (`RemovePairingAny`, `TryCandidatesInOrder`), `Monitors/UsbMonitor.cs` (`ResolveBluetoothBlock`), PROJECT.md section 5.5 |
 | The companion-relay double-dispose fix (leaveOpen:true) | `Core/DisplayCompanionRelay.cs`, `Core/BluetoothCompanionRelay.cs`, `DlpEndpointMonitor.Tests/CompanionRelayPipeTests.cs` |
 | Display topology blocking/restore | `Monitors/DisplayMonitor.cs`, `Actions/DisplayActions.cs` |
+| Why a headless primary missed pure Win+P projection switches, and the relay that fixes it | `Core/DisplayChangeRelay.cs`, `Monitors/DisplayMonitor.cs` (`NotifyExternalDisplayChange`), section 5.6 |
 | GUID/CoD -> DeviceKind resolution | `Core/UsbKind.cs`, `Actions/BluetoothActions.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |

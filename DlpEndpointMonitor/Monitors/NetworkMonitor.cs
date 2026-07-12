@@ -116,10 +116,10 @@ sealed class NetworkMonitor : IDisposable
                 checked_++;
                 bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
                             && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
-                EventEmitter.EmitInfo($"net_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
                 if (!allowed)
                 {
                     blocked++;
+                    EventEmitter.EmitInfo($"net_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
                     Task.Run(() => BlockDevice(parsed));
                 }
             }

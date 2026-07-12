@@ -380,6 +380,18 @@ static class NativeMethods
         [Out] DisplayConfigModeInfo[] modeInfoArray,
         IntPtr                      currentTopologyId);
 
+    // Same native QueryDisplayConfig entry point, but with a real out-param instead of IntPtr.Zero
+    // for the last argument - only meaningful (and only populated by Windows) when flags is
+    // QDC_DATABASE_CURRENT, which is the one case DisplayActions.GetCurrentTopology needs.
+    [DllImport("user32.dll", EntryPoint = "QueryDisplayConfig")]
+    public static extern int QueryDisplayConfigTopology(
+        uint                        flags,
+        ref uint                    numPathArrayElements,
+        [Out] DisplayConfigPathInfo[] pathArray,
+        ref uint                    numModeInfoArrayElements,
+        [Out] DisplayConfigModeInfo[] modeInfoArray,
+        out uint                    currentTopologyId);
+
     public const uint SDC_TOPOLOGY_INTERNAL          = 0x00000001;
     public const uint SDC_TOPOLOGY_EXTEND            = 0x00000004;
     public const uint SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x00000020;
@@ -388,6 +400,21 @@ static class NativeMethods
     public const uint SDC_ALLOW_CHANGES              = 0x00000400;
 
     public const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
+
+    // Flags param for GetDisplayConfigBufferSizes/QueryDisplayConfig - the CCD database's current
+    // topology entry, rather than a live path snapshot. Required (and the only flag that populates
+    // the out currentTopologyId param above) for reading which Win+P mode is currently active.
+    public const uint QDC_DATABASE_CURRENT = 0x00000004;
+
+    // DISPLAYCONFIG_TOPOLOGY_ID values returned via QueryDisplayConfigTopology's out param -
+    // exactly the four Win+P projection modes (PC screen only / Duplicate / Extend / Second
+    // screen only). Bit-identical to the SDC_TOPOLOGY_* Set flags above by coincidence of the
+    // underlying Win32 API, but named separately since they come from a different call (Query,
+    // not Set) and mixing the two constant sets would be confusing to read.
+    public const uint DISPLAYCONFIG_TOPOLOGY_INTERNAL = 0x00000001;
+    public const uint DISPLAYCONFIG_TOPOLOGY_CLONE    = 0x00000002;
+    public const uint DISPLAYCONFIG_TOPOLOGY_EXTEND   = 0x00000004;
+    public const uint DISPLAYCONFIG_TOPOLOGY_EXTERNAL = 0x00000008;
 
     public const uint DISPLAYCONFIG_PATH_ACTIVE             = 0x00000001;
     public const uint DISPLAYCONFIG_PATH_MODE_IDX_INVALID   = 0xFFFFFFFF;

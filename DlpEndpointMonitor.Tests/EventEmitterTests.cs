@@ -8,7 +8,10 @@ public class EventEmitterTests
 {
     // A type deliberately NOT added to AppJsonContext, so EventEmitter.Emit's
     // AppJsonContext.Default.GetTypeInfo lookup returns null for it (T-EVT-02).
-    record FakeUnregisteredEvent(string Note) : IEvent;
+    record FakeUnregisteredEvent(string Note) : IEvent
+    {
+        public string EventId { get; } = EventEmitter.NewEventId();
+    }
 
     // T-EVT-01: Emit on a registered event type writes exactly one valid-JSON line,
     // terminated by the process's line terminator, and flushes the buffer.
@@ -232,6 +235,25 @@ public class EventEmitterTests
         yield return new object[] { new DeviceBlacklistGetEvent("id-1", true, false, Array.Empty<WhitelistEntryDto>()) };
     }
 
+    // T-EVT-07b: `with` on an IEvent record preserves its already-generated EventId - the
+    // invariant UsbMonitor's group-anchor feature (SourceEventId) depends on: it constructs an
+    // event, reads its real EventId as the anchor candidate, then folds the resolved SourceEventId
+    // back in via `with`. If `with` re-ran the EventId field initializer instead of copying the
+    // existing value, every anchor stored would point at a EventId nothing in the stream actually
+    // carries.
+    [Fact]
+    public void With_OnUsbDeviceConnectedEvent_PreservesOriginalEventId()
+    {
+        var original = new UsbDeviceConnectedEvent(
+            "1234", "abcd", null, null, DeviceKind.Storage, null, "group-1", "instance-1",
+            @"\\?\usb#vid_1234", true, null, 123);
+
+        var withSourceEventId = original with { SourceEventId = "anchor-event-id" };
+
+        Assert.Equal(original.EventId, withSourceEventId.EventId);
+        Assert.Equal("anchor-event-id", withSourceEventId.SourceEventId);
+    }
+
     // T-EVT-08: UsbDeviceConnectedEvent.InstanceId is required - it always serializes.
     [Fact]
     public void Emit_UsbDeviceConnectedEvent_SerializesRequiredInstanceId()
@@ -241,7 +263,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceConnectedEvent("1234", "abcd", null, null, DeviceKind.Storage, null, null, "instance-1", @"\\?\usb#vid_1234", true, 123));
+            EventEmitter.Emit(new UsbDeviceConnectedEvent("1234", "abcd", null, null, DeviceKind.Storage, null, null, "instance-1", @"\\?\usb#vid_1234", true, null, 123));
         }
         finally
         {
@@ -262,7 +284,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceDisconnectedEvent(null, null, null, @"\\?\usb#vid_1234", null, DeviceKind.Storage, null, null, "instance-2", 123));
+            EventEmitter.Emit(new UsbDeviceDisconnectedEvent(null, null, null, @"\\?\usb#vid_1234", null, DeviceKind.Storage, null, null, "instance-2", null, 123));
         }
         finally
         {
@@ -281,7 +303,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceDisconnectedEvent(null, null, null, @"\\?\usb#vid_1234", null, DeviceKind.Storage, null, null, null, 123));
+            EventEmitter.Emit(new UsbDeviceDisconnectedEvent(null, null, null, @"\\?\usb#vid_1234", null, DeviceKind.Storage, null, null, null, null, 123));
         }
         finally
         {
@@ -302,7 +324,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceUnblockedEvent(null, null, null, DeviceKind.Storage, "group-1", "instance-3", 123));
+            EventEmitter.Emit(new UsbDeviceUnblockedEvent(null, null, null, DeviceKind.Storage, "group-1", "instance-3", null, 123));
         }
         finally
         {
@@ -321,7 +343,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceUnblockedEvent(null, null, null, DeviceKind.Storage, null, "instance-3", 123));
+            EventEmitter.Emit(new UsbDeviceUnblockedEvent(null, null, null, DeviceKind.Storage, null, "instance-3", null, 123));
         }
         finally
         {
@@ -341,7 +363,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(null, null, null, DeviceKind.Storage, "group-2", "instance-4", "some error", 123));
+            EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(null, null, null, DeviceKind.Storage, "group-2", "instance-4", "some error", null, 123));
         }
         finally
         {
@@ -360,7 +382,7 @@ public class EventEmitterTests
         Console.SetOut(writer);
         try
         {
-            EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(null, null, null, DeviceKind.Storage, null, "instance-4", "some error", 123));
+            EventEmitter.Emit(new UsbDeviceUnblockFailedEvent(null, null, null, DeviceKind.Storage, null, "instance-4", "some error", null, 123));
         }
         finally
         {

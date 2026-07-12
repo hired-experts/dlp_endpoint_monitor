@@ -45,6 +45,7 @@ public enum EventType
     [JsonStringEnumMemberName("monitor_disconnected")]           MonitorDisconnected,
     [JsonStringEnumMemberName("monitor_blocked")]                MonitorBlocked,
     [JsonStringEnumMemberName("monitor_block_failed")]           MonitorBlockFailed,
+    [JsonStringEnumMemberName("monitor_projection_changed")]     MonitorProjectionChanged,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
@@ -124,6 +125,18 @@ public enum ClipboardKind
     [JsonStringEnumMemberName("files")]   Files,
     [JsonStringEnumMemberName("image")]   Image,
     [JsonStringEnumMemberName("unknown")] Unknown,
+}
+
+// The four Win+P projection modes, read from QueryDisplayConfig(QDC_DATABASE_CURRENT)'s
+// currentTopologyId out-param - see DisplayActions.GetCurrentTopology/MapTopologyId.
+[JsonConverter(typeof(JsonStringEnumConverter<DisplayTopology>))]
+public enum DisplayTopology
+{
+    [JsonStringEnumMemberName("unknown")]  Unknown,
+    [JsonStringEnumMemberName("internal")] Internal,  // "PC screen only"
+    [JsonStringEnumMemberName("clone")]    Clone,     // "Duplicate"
+    [JsonStringEnumMemberName("extend")]   Extend,    // "Extend"
+    [JsonStringEnumMemberName("external")] External,  // "Second screen only"
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<ProtectionMode>))]

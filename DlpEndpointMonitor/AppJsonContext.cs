@@ -18,6 +18,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(DeviceKind))]
 [JsonSerializable(typeof(ClipboardKind))]
 [JsonSerializable(typeof(ProtectionMode))]
+[JsonSerializable(typeof(DisplayTopology))]
 
 // ── Replies ───────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(ReplyEvent))]
@@ -58,6 +59,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(MonitorDisconnectedEvent))]
 [JsonSerializable(typeof(MonitorBlockedEvent))]
 [JsonSerializable(typeof(MonitorBlockFailedEvent))]
+[JsonSerializable(typeof(MonitorProjectionChangedEvent))]
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(KeyboardShortcutEvent))]

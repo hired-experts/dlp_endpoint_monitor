@@ -62,4 +62,18 @@ public class DisplayActionsParsingTests
         Assert.Equal("SAM", parsed!.Vid);
         Assert.Equal("0F91", parsed.Pid);
     }
+
+    // T-DISP-05: MapTopologyId - pure mapping from a raw DISPLAYCONFIG_TOPOLOGY_ID bit value to
+    // DisplayTopology, factored out of GetCurrentTopology so it's testable without a real display.
+    [Theory]
+    [InlineData(0x00000001u, DisplayTopology.Internal)]
+    [InlineData(0x00000002u, DisplayTopology.Clone)]
+    [InlineData(0x00000004u, DisplayTopology.Extend)]
+    [InlineData(0x00000008u, DisplayTopology.External)]
+    [InlineData(0x00000000u, DisplayTopology.Unknown)]
+    [InlineData(0xFFFFFFFFu, DisplayTopology.Unknown)]
+    public void MapTopologyId_KnownAndUnknownValues_MapCorrectly(uint topologyId, DisplayTopology expected)
+    {
+        Assert.Equal(expected, DisplayActions.MapTopologyId(topologyId));
+    }
 }

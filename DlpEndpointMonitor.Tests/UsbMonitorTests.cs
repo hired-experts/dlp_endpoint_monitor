@@ -67,3 +67,78 @@ public class UsbMonitorTests
         Assert.True(disableCalled);
     }
 }
+
+// T-USBMON-05..08: UsbMonitor.ResolveGroupAnchorCore - the pure get-or-create decision behind the
+// group-anchor correlation feature (a composite device's SourceEventId), factored out the same way
+// ResolveBluetoothBlock is - no locking, no Win32, just the dictionary logic, so it is driven here
+// against a plain Dictionary<string, string> instead of a real UsbMonitor instance. The
+// release-if-last-sibling cleanup (ReleaseGroupAnchorIfLastSibling) is NOT covered here: it calls
+// UsbActions.EnumerateGroupSiblings directly (a live SetupDi enumeration) with no seam to fake "is
+// any sibling still connected" without a larger refactor of that call path - out of scope for this
+// change per the design's own guidance to skip rather than force an awkward test.
+public class UsbMonitorGroupAnchorTests
+{
+    [Fact]
+    public void ResolveGroupAnchorCore_FirstSighting_EstablishesAnchorAndReturnsNull()
+    {
+        var anchors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        string? result = UsbMonitor.ResolveGroupAnchorCore(anchors, "group-1", "event-A");
+
+        Assert.Null(result);
+        Assert.Equal("event-A", anchors["group-1"]);
+    }
+
+    [Fact]
+    public void ResolveGroupAnchorCore_SecondSighting_ReturnsExistingAnchorNotCandidate()
+    {
+        var anchors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["group-1"] = "event-A"
+        };
+
+        string? result = UsbMonitor.ResolveGroupAnchorCore(anchors, "group-1", "event-B");
+
+        Assert.Equal("event-A", result);
+        Assert.Equal("event-A", anchors["group-1"]); // candidate never overwrites the existing anchor
+    }
+
+    [Fact]
+    public void ResolveGroupAnchorCore_CaseInsensitiveGroupId_TreatsAsSameGroup()
+    {
+        var anchors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["GROUP-1"] = "event-A"
+        };
+
+        string? result = UsbMonitor.ResolveGroupAnchorCore(anchors, "group-1", "event-B");
+
+        Assert.Equal("event-A", result);
+    }
+
+    [Fact]
+    public void ResolveGroupAnchorCore_NullGroupId_AlwaysReturnsNullAndDoesNotMutateDictionary()
+    {
+        var anchors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        string? result = UsbMonitor.ResolveGroupAnchorCore(anchors, null, "event-A");
+
+        Assert.Null(result);
+        Assert.Empty(anchors);
+    }
+
+    [Fact]
+    public void ResolveGroupAnchorCore_DistinctGroups_EachGetsItsOwnAnchor()
+    {
+        var anchors = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        string? first = UsbMonitor.ResolveGroupAnchorCore(anchors, "group-1", "event-A");
+        string? second = UsbMonitor.ResolveGroupAnchorCore(anchors, "group-2", "event-B");
+
+        Assert.Null(first);
+        Assert.Null(second);
+        Assert.Equal(2, anchors.Count);
+        Assert.Equal("event-A", anchors["group-1"]);
+        Assert.Equal("event-B", anchors["group-2"]);
+    }
+}

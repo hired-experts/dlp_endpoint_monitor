@@ -107,4 +107,41 @@ public class CompanionRelayPipeTests
 
         AssertNoErrorEvents(sw.ToString());
     }
+
+    [Fact]
+    public void DisplayChangeRelay_Notify_InvokesCallbackRepeatedlyWithNoErrorEvents()
+    {
+        string pipeName = UniquePipeName(DisplayChangeRelay.PipeName);
+        int callbackCount = 0;
+        var callbackSeen  = new ManualResetEventSlim(false);
+
+        using var server = new DisplayChangeRelay.Server(() =>
+        {
+            Interlocked.Increment(ref callbackCount);
+            callbackSeen.Set();
+        }, pipeName);
+        using var client = new DisplayChangeRelay.Client(pipeName);
+
+        Assert.True(client.IsConnected);
+
+        var sw = new StringWriter();
+        var originalOut = Console.Out;
+        Console.SetOut(sw);
+        try
+        {
+            for (int i = 0; i < Iterations; i++)
+            {
+                callbackSeen.Reset();
+                client.Notify();
+                Assert.True(callbackSeen.Wait(TimeSpan.FromSeconds(2)), $"iteration {i}: callback was not invoked in time. stdout-so-far: {sw}");
+            }
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+        }
+
+        Assert.Equal(Iterations, callbackCount);
+        AssertNoErrorEvents(sw.ToString());
+    }
 }

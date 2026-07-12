@@ -159,6 +159,46 @@ static class DisplayActions
     }
 
     /// <summary>
+    /// Reads which of the four Win+P projection modes (PC screen only / Duplicate / Extend /
+    /// Second screen only) is currently active, via QueryDisplayConfig(QDC_DATABASE_CURRENT)'s
+    /// currentTopologyId out-param - the same identifier Windows itself uses to decide which
+    /// Win+P tile is highlighted. Returns <see cref="DisplayTopology.Unknown"/> rather than
+    /// throwing if either CCD call fails, since this only feeds an informational event, never a
+    /// block/allow decision.
+    /// </summary>
+    public static DisplayTopology GetCurrentTopology()
+    {
+        int result = NativeMethods.GetDisplayConfigBufferSizes(
+            NativeMethods.QDC_DATABASE_CURRENT, out uint numPaths, out uint numModes);
+        if (result != 0) return DisplayTopology.Unknown;
+
+        var paths = new DisplayConfigPathInfo[numPaths];
+        var modes = new DisplayConfigModeInfo[numModes];
+
+        result = NativeMethods.QueryDisplayConfigTopology(
+            NativeMethods.QDC_DATABASE_CURRENT,
+            ref numPaths, paths, ref numModes, modes,
+            out uint topologyId);
+        if (result != 0) return DisplayTopology.Unknown;
+
+        return MapTopologyId(topologyId);
+    }
+
+    /// <summary>
+    /// Pure mapping from a raw DISPLAYCONFIG_TOPOLOGY_ID bit value to <see cref="DisplayTopology"/>,
+    /// factored out of <see cref="GetCurrentTopology"/> so the mapping itself is unit-testable
+    /// without a real display/CCD call.
+    /// </summary>
+    public static DisplayTopology MapTopologyId(uint topologyId) => topologyId switch
+    {
+        NativeMethods.DISPLAYCONFIG_TOPOLOGY_INTERNAL => DisplayTopology.Internal,
+        NativeMethods.DISPLAYCONFIG_TOPOLOGY_CLONE    => DisplayTopology.Clone,
+        NativeMethods.DISPLAYCONFIG_TOPOLOGY_EXTEND   => DisplayTopology.Extend,
+        NativeMethods.DISPLAYCONFIG_TOPOLOGY_EXTERNAL => DisplayTopology.External,
+        _                                              => DisplayTopology.Unknown,
+    };
+
+    /// <summary>
     /// Yields a <see cref="ParsedDevice"/> for every external monitor currently connected.
     /// </summary>
     public static IEnumerable<ParsedDevice> EnumerateConnected()

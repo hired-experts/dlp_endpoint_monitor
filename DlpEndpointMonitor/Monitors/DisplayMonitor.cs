@@ -75,6 +75,15 @@ sealed class DisplayMonitor : IDisposable
     // including when it auto-activates an external monitor after a cable is connected.
     // We debounce 800 ms to let the topology settle (HDMI audio interfaces often cycle
     // during a SetDisplayConfig call) before re-checking compliance.
+    //
+    // WM_DISPLAYCHANGE is session/desktop-scoped — a primary running headless in Session 0
+    // never receives it on its own message window, unlike WM_DEVICECHANGE (systemwide/PnP),
+    // which is why arrival-blocking worked but a pure Win+P projection-mode switch on an
+    // already-connected monitor did not. NotifyExternalDisplayChange lets DisplayChangeRelay
+    // feed the companion's real WM_DISPLAYCHANGE (it runs in the interactive session) into this
+    // exact same debounce path instead of duplicating it.
+    public void NotifyExternalDisplayChange() => OnDisplayChanged();
+
     void OnDisplayChanged()
     {
         try
@@ -97,7 +106,11 @@ sealed class DisplayMonitor : IDisposable
 
             Task.Delay(800, cts.Token).ContinueWith(t =>
             {
-                if (!t.IsCanceled) BlockNonCompliant();
+                if (!t.IsCanceled)
+                {
+                    EmitProjectionChanged();
+                    BlockNonCompliant();
+                }
             }, TaskScheduler.Default);
         }
         catch (Exception ex)
@@ -105,6 +118,23 @@ sealed class DisplayMonitor : IDisposable
             // WM_DISPLAYCHANGE runs on the message-loop thread - never let this throw,
             // or the unhandled exception tears down the whole native process.
             EventEmitter.EmitError("display_monitor", ex.Message);
+        }
+    }
+
+    // Reports WHICH Win+P mode is now active, distinct from the compliance re-check that follows
+    // in the same debounce tick - a WM_DISPLAYCHANGE means the topology changed even when nothing
+    // ends up blocked, and the caller (agent/dashboard) has no other way to learn what it changed
+    // TO. Never throws: an unreadable topology degrades to DisplayTopology.Unknown, not a lost event.
+    void EmitProjectionChanged()
+    {
+        try
+        {
+            var topology = DisplayActions.GetCurrentTopology();
+            EventEmitter.Emit(new MonitorProjectionChangedEvent(topology, EventEmitter.Ts()));
+        }
+        catch (Exception ex)
+        {
+            EventEmitter.EmitError("monitor_projection_changed", ex.Message);
         }
     }
 
@@ -130,22 +160,40 @@ sealed class DisplayMonitor : IDisposable
     {
         try
         {
-            int checked_ = 0, blocked = 0;
+            int checked_ = 0;
+            var nonCompliant = new List<ParsedDevice>();
             foreach (var parsed in DisplayActions.EnumerateConnected())
             {
                 checked_++;
                 bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
                             && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
-                if (!allowed) blocked++;
+                if (!allowed) nonCompliant.Add(parsed);
             }
 
-            if (blocked > 0)
+            if (nonCompliant.Count > 0)
             {
                 var (ok, error) = _disableExternalDisplays();
                 if (!ok) EventEmitter.EmitError("monitor_policy_apply", error ?? "DisableExternalDisplays failed");
+
+                // One MonitorBlockedEvent/MonitorBlockFailedEvent per non-compliant monitor found,
+                // same shape HandleArrival/BlockAllExternal emits for a single arriving device - a
+                // re-check triggered by a policy change or a projection-mode switch (via
+                // DisplayChangeRelay) must not degrade to only the aggregate info line below, or the
+                // agent/dashboard has no per-device audit event to key off of for this path.
+                foreach (var parsed in nonCompliant)
+                {
+                    string? vid = string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid;
+                    string? pid = string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid;
+
+                    IEvent ev = ok
+                        ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, EventEmitter.Ts())
+                        : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, error, EventEmitter.Ts());
+
+                    EventEmitter.Emit(ev);
+                }
             }
 
-            EventEmitter.EmitInfo($"monitor_policy_apply: checked {checked_} monitor(s), blocking {blocked}");
+            EventEmitter.EmitInfo($"monitor_policy_apply: checked {checked_} monitor(s), blocking {nonCompliant.Count}");
         }
         catch (Exception ex)
         {
