@@ -368,56 +368,39 @@ sealed class UsbMonitor : IDisposable
         bool    ok;
         string? error;
 
-        // Bluetooth-backed HID (BLE/classic): unpair rather than disable the device's own
-        // BTHLEDEVICE/BTHENUM node. Windows Settings' Connected/Paired indicator reads the
-        // Bluetooth pairing/link-state store, not devnode enabled/disabled state -
-        // CM_Disable_DevNode stops HID input reaching apps but never changes what Settings
-        // shows, only an actual unpair does. This is not tracked in _disabled and cannot be
-        // auto-restored by RestoreCompliant - the user must manually re-pair the device.
+        // Bluetooth-backed HID (BLE/classic): disable the device's own primary node
+        // (GetBluetoothDeviceNode - the BTHLE\/BTHENUM\ node, never the HID leaf, since vendor
+        // software like Logitech Options re-enables a disabled leaf on its own) instead of
+        // unpairing it.
         //
-        // MULTIPLE candidate addresses are tried, not just this one arrival's own node: a BLE
-        // peripheral (real production case - a Bluetooth LE mouse) can regenerate its address
-        // across power cycles, so the address on THIS arrival's devnode is not guaranteed to be
-        // the one Windows' remembered-devices store still has on file for the original pairing.
-        // See UsbActions.GetBluetoothPairingCandidates for the full rationale. This is
-        // kind-agnostic - candidate resolution never looks at parsed.Kind, so it applies the
-        // same way to a Bluetooth mouse, keyboard, audio device, or generic HID/dongle.
-        var btCandidateNodes = UsbActions.GetBluetoothPairingCandidates(parsed.InstanceId);
-        if (btCandidateNodes.Count > 0)
+        // Unpair (BluetoothActions.RemovePairing/RemovePairingAny via
+        // UsbActions.GetBluetoothPairingCandidates) is intentionally NOT called here anymore -
+        // a real production incident (see AGENTS.md "sharp edges") showed candidate resolution
+        // walking up to the shared BTH\MS_BTHLE\ enumerator, which every Bluetooth device on the
+        // machine sits under, not just rotated addresses of the SAME physical device, and
+        // issuing a real BluetoothRemoveDevice call against an unrelated mouse's live pairing
+        // while blocking an unrelated keyboard - the mouse never reconnected again, even after
+        // the policy was removed and the user tried re-pairing manually through Windows Settings.
+        // GetBluetoothPairingCandidates/RemovePairingAny/ResolveBluetoothBlock are left fully
+        // intact and still unit-tested (UsbActionsParsingTests, BluetoothActionsParsingTests,
+        // UsbMonitorTests) for a future fix that scopes candidates to the SAME device (e.g.
+        // matching Vid/Pid) instead of every sibling under the shared enumerator - do not delete
+        // them just because this call site stopped using them.
+        //
+        // Trade-off accepted: Windows Settings' Connected/Paired indicator reads the pairing
+        // store, not devnode state, so a disable-only block still shows the device as
+        // "Connected" there, and since the pairing itself survives, Windows may keep
+        // re-establishing the underlying link whenever the device is in range - each reconnect
+        // re-arrives a devnode and this method just re-disables it. Accepted in exchange for
+        // never again touching a device other than the one policy actually matched:
+        // GetBluetoothDeviceNode walks only THIS device's own ancestor chain (no
+        // CM_Get_Child/CM_Get_Sibling fan-out to other devices), so it cannot repeat the
+        // incident above by construction.
+        string? btNode = UsbActions.GetBluetoothDeviceNode(parsed.InstanceId);
+        if (btNode is not null)
         {
-            string btNode = btCandidateNodes[0]; // same primary node GetBluetoothDeviceNode would return
-            var btMacs = btCandidateNodes
-                .Select(BluetoothActions.ParseMacFromPath)
-                .Where(mac => mac is not null)
-                .Select(mac => mac!)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (btMacs.Count > 0)
-            {
-                // Unpair first (best outcome - Windows Settings correctly shows the device
-                // gone), falling back to disabling the devnode if unpair genuinely fails, so a
-                // device is never left fully functional just because RemovePairing didn't work
-                // for it. Confirmed live on real hardware: the legacy BluetoothRemoveDevice API
-                // can fail (ERROR_NOT_FOUND) even against an address confirmed present in
-                // Windows' own remembered-devices registry - Windows Settings' own "Remove
-                // device" succeeded against the identical address where this API did not, so
-                // this is a real, expected API limitation for some Bluetooth LE peripherals, not
-                // a parsing bug - leaving the device unblocked in that case would be a silent
-                // enforcement gap, exactly what this fallback closes.
-                (ok, error, disabledId) = ResolveBluetoothBlock(
-                    () => BluetoothActions.RemovePairingAny(btMacs),
-                    () => UsbActions.DisableDevice(btNode),
-                    btNode);
-            }
-            else
-            {
-                // Should not normally happen (every candidate is a BTHENUM/BTHLE node, which
-                // ParseMacFromPath is built to parse) - fall back to disable so blocking never
-                // silently no-ops for a node whose MAC we failed to extract.
-                (ok, error) = UsbActions.DisableDevice(btNode);
-                if (ok) disabledId = btNode;
-            }
+            (ok, error) = UsbActions.DisableDevice(btNode);
+            if (ok) disabledId = btNode;
             // No USB-group / eject fallback for Bluetooth - both would target the radio.
         }
         else

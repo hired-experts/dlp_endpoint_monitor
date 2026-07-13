@@ -1,3 +1,4 @@
+using DlpEndpointMonitor.AlertContracts;
 using DlpEndpointMonitor.Core;
 
 namespace DlpEndpointMonitor.Commands;
@@ -165,3 +166,9 @@ record ShutdownCmd(string? Id) : ICommand;
 // call for when the caller wants every list cleared at once rather than four round trips.
 [JsonDiscriminant(CommandType.ResetAllPolicy)]
 record ResetAllPolicyCmd(string? Id) : ICommand;
+
+// SourceEventId is deliberately NOT the same field as Id: Id is the ordinary reply-correlation
+// id every command has; SourceEventId is the EventId of the blocked/detected event this alert is
+// about (set by the agent) and maps into AlertRequest.Id, the alert-coalescing key AlertHost uses.
+[JsonDiscriminant(CommandType.ShowAlert)]
+record ShowAlertCmd(string? Id, string SourceEventId, string Title, string Message, AlertType Type = AlertType.Toast, AlertSeverity Severity = AlertSeverity.Blocked, int? DurationSeconds = null) : ICommand;

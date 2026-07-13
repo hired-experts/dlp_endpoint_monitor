@@ -73,6 +73,11 @@ public class CommandDispatcherTests
         public void Handle(ResetAllPolicyCmd command) => recorder.Record(nameof(ResetAllPolicyCmd), command);
     }
 
+    sealed class FakeAlertHandler(CallRecorder recorder) : IAlertHandler
+    {
+        public void Handle(ShowAlertCmd command) => recorder.Record(nameof(ShowAlertCmd), command);
+    }
+
     sealed class FakeClipboardProtectionHandler(CallRecorder recorder) : IClipboardProtectionHandler
     {
         public void Handle(ClipboardProtectionStatusCmd command) => recorder.Record(nameof(ClipboardProtectionStatusCmd), command);
@@ -118,7 +123,8 @@ public class CommandDispatcherTests
                 new FakeUsbDeviceHandler(recorder),
                 new FakeUsbProtectionHandler(recorder),
                 new FakeClipboardProtectionHandler(recorder),
-                new FakeControlHandler(recorder));
+                new FakeControlHandler(recorder),
+                new FakeAlertHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();
 
@@ -375,7 +381,8 @@ public class CommandDispatcherTests
                 new FakeUsbDeviceHandler(new CallRecorder()),
                 new FakeUsbProtectionHandler(new CallRecorder()),
                 new FakeClipboardProtectionHandler(new CallRecorder()),
-                new FakeControlHandler(new CallRecorder()));
+                new FakeControlHandler(new CallRecorder()),
+                new FakeAlertHandler(new CallRecorder()));
 
             Task runTask = dispatcher.RunAsync();
 
@@ -424,7 +431,8 @@ public class CommandDispatcherTests
                 new FakeUsbDeviceHandler(recorder),
                 new FakeUsbProtectionHandler(recorder),
                 new FakeClipboardProtectionHandler(recorder),
-                new FakeControlHandler(recorder));
+                new FakeControlHandler(recorder),
+                new FakeAlertHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();
             Task completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(2)));

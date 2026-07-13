@@ -72,3 +72,8 @@ interface IControlHandler
     void Handle(ShutdownCmd command);
     void Handle(ResetAllPolicyCmd command);
 }
+
+interface IAlertHandler
+{
+    void Handle(ShowAlertCmd command);
+}

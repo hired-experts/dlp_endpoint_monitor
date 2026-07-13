@@ -93,6 +93,7 @@ public enum CommandType
     [JsonStringEnumMemberName("ping")]                   Ping,
     [JsonStringEnumMemberName("shutdown")]               Shutdown,
     [JsonStringEnumMemberName("reset_all_policy")]       ResetAllPolicy,
+    [JsonStringEnumMemberName("show_alert")]             ShowAlert,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<DeviceKind>))]

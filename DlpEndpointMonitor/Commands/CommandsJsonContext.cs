@@ -1,3 +1,4 @@
+using DlpEndpointMonitor.AlertContracts;
 using DlpEndpointMonitor.Core;
 using System.Text.Json.Serialization;
 
@@ -71,5 +72,8 @@ namespace DlpEndpointMonitor.Commands;
 [JsonSerializable(typeof(PingCmd))]
 [JsonSerializable(typeof(ShutdownCmd))]
 [JsonSerializable(typeof(ResetAllPolicyCmd))]
+[JsonSerializable(typeof(ShowAlertCmd))]
+[JsonSerializable(typeof(AlertType))]
+[JsonSerializable(typeof(AlertSeverity))]
 
 internal partial class CommandsJsonContext : JsonSerializerContext { }

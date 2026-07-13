@@ -433,7 +433,8 @@ var dispatcher = new CommandDispatcher(
         reevaluate: ReevaluateClipboard),
     control:           new WindowsControlHandler(stopCompanion,
         whitelist, blacklist, clipboardWhitelist, clipboardBlacklist,
-        restoreDevices: RestoreDevices, clipboardReevaluate: ReevaluateClipboard));
+        restoreDevices: RestoreDevices, clipboardReevaluate: ReevaluateClipboard),
+    alert:             new WindowsAlertHandler());
 
 try
 {

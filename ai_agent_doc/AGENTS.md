@@ -503,23 +503,43 @@ what is and is not covered and why.
   peripheral (Windows cascades a parent's disable to its children, so a disable-based approach
   may still "work" by accident on the wrong node, but `RemovePairing` on the wrong MAC would
   simply fail to match any pairing at all).
-- **Bluetooth blocking tries unpair (`BluetoothActions.RemovePairing`) first, but ALWAYS falls
-  back to disabling the devnode if unpair fails, for any reason.** Unpair traded away
-  reversibility (an unpaired device can no longer be auto-restored by `RestoreCompliant` - see
-  section 7's carve-out) for a correctness requirement: Windows Settings' Connected/Paired
-  indicator reads the Bluetooth pairing/link-state store, not PnP devnode enabled/disabled
-  state, so `CM_Disable_DevNode` alone stops HID input but never changes what Settings displays.
-  But confirmed live: the legacy `BluetoothRemoveDevice` API can fail outright for some
-  Bluetooth LE peripherals even given a correct, registered address (see the next bullet) - so
-  leaving the device fully connected in that case would be a real enforcement gap, not an
-  acceptable degraded mode. `BluetoothMonitor.BlockDevice` works directly from a MAC and calls
-  `RemovePairing` once (no disable fallback exists on this path - it has no devnode to disable
-  from, only a MAC). `UsbMonitor.BlockDevice`'s Bluetooth branch resolves one or more MAC
-  **candidates** via `UsbActions.GetBluetoothPairingCandidates`, calls
-  `BluetoothActions.RemovePairingAny`, and - if that fails - falls back to `DisableDevice` on
-  the primary node via `UsbMonitor.ResolveBluetoothBlock` (pure decision logic, unit tested in
-  `DlpEndpointMonitor.Tests/UsbMonitorTests.cs`). A device blocked via this fallback IS tracked
-  in `DisabledDevices` and CAN be auto-restored - only a successful unpair loses that.
+- **[fixed - real production incident, confirmed via this machine's own event log]
+  `UsbMonitor.BlockDevice`'s Bluetooth branch no longer unpairs at all - it disables the
+  device's own primary node (`UsbActions.GetBluetoothDeviceNode`) instead, because the
+  candidate-retry mechanism unpair depended on took down a completely unrelated device.**
+  Blacklisting `kind=keyboard` with a Bluetooth keyboard AND a Bluetooth mouse both connected
+  resolved the keyboard's own candidate list via `UsbActions.GetBluetoothPairingCandidates`,
+  which - as designed (see the next bullet) - walked up to the shared `BTH\MS_BTHLE\` enumerator
+  and collected every OTHER `BTHLE\` sibling under it as a "candidate", including the mouse's own
+  node, which has nothing to do with the keyboard rotating its own address. `RemovePairingAny`
+  then issued a real `BluetoothRemoveDevice` call against the mouse's live, correct pairing. Both
+  the keyboard's own address and the mouse's returned `ERROR_NOT_FOUND (0x490)` on that machine
+  (the legacy-API limitation the next bullet already documents), so by this code's own bookkeeping
+  nothing succeeded and neither device was ever recorded in `DisabledDevices` - but the mouse's
+  live BLE link still degraded over the following minutes and fully disconnected, and neither
+  device could be re-paired afterward even through Windows Settings, with the policy removed. The
+  doc comment's claim that "a non-matching address is a harmless no-op" is therefore false in
+  practice: an unpair attempt against an actively-connected BLE peripheral is not inert on real
+  hardware, even when the call itself reports failure.
+  Fix: `UsbMonitor.BlockDevice`'s Bluetooth branch now calls `UsbActions.GetBluetoothDeviceNode`
+  (this device's own ancestor walk only - no `CM_Get_Child`/`CM_Get_Sibling` fan-out to other
+  devices, so it cannot repeat this incident by construction) and `UsbActions.DisableDevice`
+  directly - `GetBluetoothPairingCandidates`/`BluetoothActions.RemovePairingAny`/
+  `UsbMonitor.ResolveBluetoothBlock` are all left intact and still unit-tested
+  (`UsbActionsParsingTests`, `BluetoothActionsParsingTests`, `UsbMonitorTests`) for a future fix
+  that scopes candidates to the SAME physical device (e.g. matching Vid/Pid) instead of every
+  sibling under the shared enumerator - they are simply no longer called from this site.
+  Trade-off accepted knowingly: Windows Settings' Connected/Paired indicator reads the pairing
+  store, not devnode state, so a disable-only block still shows as "Connected" there, and since
+  the pairing survives, Windows may keep re-establishing the underlying link whenever the device
+  is in range - each reconnect re-arrives a devnode and this method just re-disables it again,
+  rather than the one-time steady state a successful unpair would give. `BluetoothMonitor.BlockDevice`
+  (the OTHER, MAC-only Bluetooth block path - see below) is UNCHANGED by this fix and still
+  unpairs; it was not involved in this incident (it found zero devices all session) but is now
+  inconsistent with `UsbMonitor`'s branch and has no devnode-from-MAC resolution to switch to
+  disable-only itself without new work - a known, not-yet-addressed gap.
+  `BluetoothMonitor.BlockDevice` works directly from a MAC and calls `RemovePairing` once (no
+  disable fallback exists on this path - it has no devnode to disable from, only a MAC).
 - **A BLE peripheral's live PnP address is not always what fails - the legacy unpair API itself
   can be the real limitation, confirmed on real hardware.** The same physical Bluetooth LE
   mouse's PnP instance ID carried a different trailing MAC-derived hex suffix on three separate
@@ -530,7 +550,13 @@ what is and is not covered and why.
   to the shared Bluetooth-enumerator parent and collects every OTHER `BTHENUM\`/`BTHLE\` sibling
   node via `CM_Get_Child`/`CM_Get_Sibling`, and `BluetoothActions.RemovePairingAny` (thin
   wrapper over the pure, unit-tested `TryCandidatesInOrder`) tries `RemovePairing` against each
-  in order - always safe, since a non-matching address is a harmless no-op. **Live testing
+  in order - believed at the time to always be safe, since a non-matching address is a harmless
+  no-op against an address that isn't live. **That assumption does not hold when the "candidate"
+  is another device's own live, connected pairing** - see the fixed incident bullet above, where
+  this same mechanism reached an unrelated mouse instead of a stale sibling of the same device.
+  `GetBluetoothPairingCandidates`/`RemovePairingAny` are no longer called from
+  `UsbMonitor.BlockDevice`'s live blocking path for this reason, though they remain intact for a
+  future Vid/Pid-scoped fix. **Live testing
   disproved the rotation theory for this failure**: no older sibling was still enumerable (only
   one candidate was ever found), and directly inspecting
   `HKLM\SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices` showed the failing address

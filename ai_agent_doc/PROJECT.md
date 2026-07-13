@@ -583,6 +583,45 @@ pre-existing record left over from a machine that was running the old disable-pr
 before this change shipped. A device blocked via unpair has no record and cannot be restored
 in software - re-pairing is manual.
 
+**[fixed - real production incident, confirmed via this machine's own event log] Everything
+above this paragraph describing `UsbMonitor.BlockDevice`'s Bluetooth branch as unpair-first is
+now history, not current behavior - only `BluetoothMonitor.BlockDevice` (mac-based, described
+above) still unpairs.** With a Bluetooth keyboard and a Bluetooth mouse both connected,
+blacklisting `kind=keyboard` correctly matched only the keyboard's own HID interface - but
+`UsbMonitor.BlockDevice`'s candidate resolution (`GetBluetoothPairingCandidates`, described
+above) walked up to the shared `BTH\MS_BTHLE\` enumerator and returned the mouse's own `BTHLE\`
+node as a "candidate" alongside the keyboard's, exactly as designed: that enumerator is shared by
+every BLE device on the machine, not scoped to siblings of the same physical device.
+`RemovePairingAny` then issued a real `BluetoothRemoveDevice` call against the mouse's live,
+correct pairing. Both the keyboard's own address and the mouse's returned `ERROR_NOT_FOUND
+(0x490)` on this machine (the exact legacy-API limitation documented above), so nothing was ever
+recorded in `DisabledDevices` for either device - but the mouse's live BLE link degraded over the
+following few minutes and fully disconnected anyway, and neither device could be re-paired
+afterward, even manually through Windows Settings, with the blacklist rule already removed. This
+disproves the "a non-matching address is a harmless no-op" safety claim this section made above:
+an unpair attempt against another device's actively-connected pairing is not inert on real
+hardware, even when the API call itself reports failure.
+
+The fix: `UsbMonitor.BlockDevice`'s Bluetooth branch no longer unpairs at all. It resolves
+`UsbActions.GetBluetoothDeviceNode(parsed.InstanceId)` (this device's own ancestor walk only -
+no `CM_Get_Child`/`CM_Get_Sibling` fan-out to any other device, so it cannot repeat this incident
+by construction) and calls `UsbActions.DisableDevice` on that node directly.
+`GetBluetoothPairingCandidates`/`BluetoothActions.RemovePairingAny`/
+`UsbMonitor.ResolveBluetoothBlock` are unchanged and still unit tested
+(`UsbActionsParsingTests`, `BluetoothActionsParsingTests`, `UsbMonitorTests`) - they are simply no
+longer called from this site, kept for a future fix that scopes candidates to the SAME physical
+device (e.g. by matching Vid/Pid) instead of every sibling under the shared enumerator. This
+trades away the cosmetically-correct Settings result (a disable-only block still shows the device
+as "Connected" there, since Settings reads the pairing store, not devnode state) and the
+steady-state cleanliness of a successful unpair (since the pairing survives, Windows may keep
+re-establishing the underlying link whenever the device is in range, and each reconnect
+re-arrives a devnode that this method just disables again) - accepted deliberately in exchange
+for the guarantee that blocking one device can never again reach another. `BluetoothMonitor
+.BlockDevice` was not involved in this incident (it found zero devices connected all session,
+per `bt_policy_apply: checked 0 device(s)` in the log) and is unchanged - it remains unpair-only,
+now inconsistent with `UsbMonitor`'s branch, and has no devnode-from-MAC resolution to switch to
+disable-only itself without new work - a known, not-yet-addressed gap.
+
 ### 5.6 Display/monitor blocking (`DisplayMonitor`, `DisplayActions`)
 
 Monitors are blocked as a **group**, not per-device: `DisableExternalDisplays` uses the

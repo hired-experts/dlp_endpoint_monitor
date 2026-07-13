@@ -14,6 +14,7 @@ sealed class CommandDispatcher
     readonly IUsbProtectionHandler       _usbProtection;
     readonly IClipboardProtectionHandler _clipboardProtection;
     readonly IControlHandler             _control;
+    readonly IAlertHandler               _alert;
 
     public CommandDispatcher(
         CancellationToken           cancellationToken,
@@ -22,7 +23,8 @@ sealed class CommandDispatcher
         IUsbDeviceHandler           usbDevice,
         IUsbProtectionHandler       usbProtection,
         IClipboardProtectionHandler clipboardProtection,
-        IControlHandler             control)
+        IControlHandler             control,
+        IAlertHandler               alert)
     {
         _cancellationToken   = cancellationToken;
         _clipboard           = clipboard;
@@ -31,6 +33,7 @@ sealed class CommandDispatcher
         _usbProtection       = usbProtection;
         _clipboardProtection = clipboardProtection;
         _control             = control;
+        _alert               = alert;
     }
 
     public async Task RunAsync()
@@ -132,6 +135,9 @@ sealed class CommandDispatcher
                 case CommandType.Ping:           _control.Handle(Deserialize<PingCmd>(rawJson));           break;
                 case CommandType.Shutdown:       _control.Handle(Deserialize<ShutdownCmd>(rawJson));       break;
                 case CommandType.ResetAllPolicy: _control.Handle(Deserialize<ResetAllPolicyCmd>(rawJson)); break;
+
+                // ── Alert ─────────────────────────────────────────────────────
+                case CommandType.ShowAlert: _alert.Handle(Deserialize<ShowAlertCmd>(rawJson)); break;
             }
         }
         catch (Exception ex)
