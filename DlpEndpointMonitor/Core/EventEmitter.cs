@@ -173,9 +173,11 @@ public record ClipboardContentBlockedEvent(string Operation, ClipboardKind Kind,
 }
 
 // Emitted when the remediation action itself fails (e.g. ClipboardActions.Clear() returns false).
+// Reason/MatchedPattern - see ClipboardContentBlockedEvent's own doc comment; Error is orthogonal,
+// it explains why the CLEAR failed, not which policy triggered the block attempt.
 // SourceEventId - see ClipboardContentBlockedEvent's own doc comment.
 [JsonDiscriminant(EventType.ClipboardContentBlockFailed)]
-public record ClipboardContentBlockFailedEvent(string Operation, ClipboardKind Kind, string? Error, string? SourceEventId, long Ts) : IEvent
+public record ClipboardContentBlockFailedEvent(string Operation, ClipboardKind Kind, string Reason, string? MatchedPattern, string? Error, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.ClipboardContentBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -217,15 +219,18 @@ public record UsbDeviceDisconnectedEvent(string? Vid, string? Pid, string? Seria
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
+// Reason is exactly "blacklist_match" or "whitelist_gate" - which policy list caused this block,
+// same convention as ClipboardContentBlockedEvent. Orthogonal to Error on the Failed sibling below,
+// which explains why the enforcement ACTION failed, not which policy triggered the attempt.
 [JsonDiscriminant(EventType.UsbDeviceBlocked)]
-public record UsbDeviceBlockedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string? SourceEventId, long Ts) : IEvent
+public record UsbDeviceBlockedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string Reason, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.UsbDeviceBlockFailed)]
-public record UsbDeviceBlockFailedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string? Error, string? SourceEventId, long Ts) : IEvent
+public record UsbDeviceBlockFailedEvent(string Vid, string Pid, string? Serial, int? UsbClass, DeviceKind Kind, string? NativeClass, string? GroupId, string InstanceId, string Reason, string? Error, string? SourceEventId, long Ts) : IEvent
 {
     public EventType Type => EventType.UsbDeviceBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -296,15 +301,16 @@ public record MonitorDisconnectedEvent(string? Vid, string? Pid, string DevicePa
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
+// Reason - see UsbDeviceBlockedEvent's doc comment; same "blacklist_match"/"whitelist_gate" convention.
 [JsonDiscriminant(EventType.MonitorBlocked)]
-public record MonitorBlockedEvent(string? Vid, string? Pid, string DevicePath, long Ts) : IEvent
+public record MonitorBlockedEvent(string? Vid, string? Pid, string DevicePath, string Reason, long Ts) : IEvent
 {
     public EventType Type => EventType.MonitorBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.MonitorBlockFailed)]
-public record MonitorBlockFailedEvent(string? Vid, string? Pid, string DevicePath, string? Error, long Ts) : IEvent
+public record MonitorBlockFailedEvent(string? Vid, string? Pid, string DevicePath, string Reason, string? Error, long Ts) : IEvent
 {
     public EventType Type => EventType.MonitorBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -346,15 +352,16 @@ public record BluetoothDeviceDisconnectedEvent(string Mac, DeviceKind Kind, stri
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
+// Reason - see UsbDeviceBlockedEvent's doc comment; same "blacklist_match"/"whitelist_gate" convention.
 [JsonDiscriminant(EventType.BluetoothDeviceBlocked)]
-public record BluetoothDeviceBlockedEvent(string Mac, DeviceKind Kind, string Name, long Ts) : IEvent
+public record BluetoothDeviceBlockedEvent(string Mac, DeviceKind Kind, string Name, string Reason, long Ts) : IEvent
 {
     public EventType Type => EventType.BluetoothDeviceBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.BluetoothDeviceBlockFailed)]
-public record BluetoothDeviceBlockFailedEvent(string Mac, DeviceKind Kind, string Name, string? Error, long Ts) : IEvent
+public record BluetoothDeviceBlockFailedEvent(string Mac, DeviceKind Kind, string Name, string Reason, string? Error, long Ts) : IEvent
 {
     public EventType Type => EventType.BluetoothDeviceBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
@@ -390,15 +397,16 @@ public record NetworkDeviceDisconnectedEvent(string? Vid, string? Pid, string? S
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
+// Reason - see UsbDeviceBlockedEvent's doc comment; same "blacklist_match"/"whitelist_gate" convention.
 [JsonDiscriminant(EventType.NetworkDeviceBlocked)]
-public record NetworkDeviceBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
+public record NetworkDeviceBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string Reason, long Ts) : IEvent
 {
     public EventType Type => EventType.NetworkDeviceBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 
 [JsonDiscriminant(EventType.NetworkDeviceBlockFailed)]
-public record NetworkDeviceBlockFailedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string? Error, long Ts) : IEvent
+public record NetworkDeviceBlockFailedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string Reason, string? Error, long Ts) : IEvent
 {
     public EventType Type => EventType.NetworkDeviceBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();

@@ -23,6 +23,17 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // Must run before the mutex/pipe/queue are touched - mirrors Program.cs's own
+        // --schema-first discipline so a schema dump never races a real singleton instance.
+        if (Array.IndexOf(e.Args, "--schema") >= 0)
+        {
+#pragma warning disable IL2026 // SchemaExporter is intentionally reflection-based; never runs in trimmed builds.
+            SchemaExporter.Export(Console.Out);
+#pragma warning restore IL2026
+            Shutdown(0);
+            return;
+        }
+
         AlertRequest? initialAlert = ParseInitialAlertArg(e.Args);
 
         _singletonMutex = new Mutex(initiallyOwned: true, SingletonMutexName, out bool createdNew);

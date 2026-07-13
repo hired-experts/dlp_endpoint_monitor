@@ -187,17 +187,18 @@ Every event has a `type` field (the JSON discriminant). Table: `type` value, C# 
 | `usb_drive_connected` / `usb_drive_disconnected` | `UsbDriveConnectedEvent` / `DisconnectedEvent` | `drives: string[], ts` | `DBT_DEVTYP_VOLUME` arrival/removal |
 | `usb_device_detected` | `UsbDeviceDetectedEvent` | `vid?, pid?, serial?, devicePath, usbClass?, kind, nativeClass?, groupId?, sourceEventId?, ts` | Arrival where VID/PID could not be parsed |
 | `usb_device_connected` / `usb_device_disconnected` | `UsbDeviceConnectedEvent` / `DisconnectedEvent` | `vid, pid, serial?, usbClass?, kind, nativeClass?, groupId?, devicePath, allowed(only on connect), sourceEventId?, ts` | USB device-interface arrival/removal. `sourceEventId` (composite devices only) is the anchor `eventId` shared by every event for this device's `groupId` in the current connect episode (section 10) |
-| `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, sourceEventId?, error?(failed only), ts` | After a block attempt |
+| `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, reason` ("blacklist_match"/"whitelist_gate"), `sourceEventId?, error?(failed only), ts` | After a block attempt. `reason` says which policy caused it (re-derived from the live composite-group check when one applies, section 10); `error` (failed only) says why the action itself failed - the two are orthogonal |
 | `usb_device_unblocked` / `usb_device_unblock_failed` | `UsbDeviceUnblockedEvent` / `UnblockFailedEvent` | `vid?, pid?, serial?, kind, instanceId, sourceEventId?, error?(failed only), ts` | During `RestoreCompliant` |
 | `usb_storage_status` | `UsbStorageStatusEvent` | `id?, ok, enabled` | Reply to `usb_storage_status` |
 | `device_protection_status` | `DeviceProtectionStatusEvent` | `id?, ok, mode, error?` | Reply to `device_protection_status`, also usable standalone |
 | `device_whitelist_get` / `device_blacklist_get` | `DeviceWhitelistGetEvent` / `DeviceBlacklistGetEvent` | `id?, ok, enabled, entries: WhitelistEntryDto[]` | Reply to the `_get` commands |
 | `monitor_connected` / `monitor_disconnected` | `MonitorConnectedEvent` / `DisconnectedEvent` | `vid?, pid?, devicePath, ts` | External monitor interface arrival/removal (`vid`/`pid` = EDID manufacturer/product code) |
-| `monitor_blocked` / `monitor_block_failed` | `MonitorBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, devicePath, error?(failed only), ts` | After `DisableExternalDisplays` - emitted both on a fresh non-compliant arrival AND per non-compliant monitor found during `BlockNonCompliant()`'s re-check (policy change or a projection-mode switch relayed via `DisplayChangeRelay`), not just arrival (section 10) |
+| `monitor_blocked` / `monitor_block_failed` | `MonitorBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, devicePath, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After `DisableExternalDisplays` - emitted both on a fresh non-compliant arrival AND per non-compliant monitor found during `BlockNonCompliant()`'s re-check (policy change or a projection-mode switch relayed via `DisplayChangeRelay`), not just arrival (section 10). Each monitor in a `BlockNonCompliant` batch carries its OWN `reason`, not one shared value |
 | `monitor_projection_changed` | `MonitorProjectionChangedEvent` | `kind ("internal"|"clone"|"extend"|"external"|"unknown"), ts` | `WM_DISPLAYCHANGE` settles (800ms debounce) - which Win+P mode is now active, read via `DisplayActions.GetCurrentTopology` |
 | `keyboard_shortcut` | `KeyboardShortcutEvent` | `action ("copy"|"cut"|"paste"|"undo"), ts` | Ctrl+C/X/V/Z detected (reporting only, never blocks the key) |
 | `bluetooth_device_connected` / `_disconnected` | `BluetoothDeviceConnectedEvent` / `DisconnectedEvent` | `mac, kind, name, allowed(connect only), ts` | Paired BT device arrival/removal |
-| `bluetooth_device_blocked` / `_block_failed` | `BluetoothDeviceBlockedEvent` / `BlockFailedEvent` | `mac, kind, name, error?(failed only), ts` | After `RemovePairing` |
+| `bluetooth_device_blocked` / `_block_failed` | `BluetoothDeviceBlockedEvent` / `BlockFailedEvent` | `mac, kind, name, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After `RemovePairing` |
+| `network_device_blocked` / `network_device_block_failed` | `NetworkDeviceBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, serial?, instanceId, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After a block attempt (`UsbActions.IsBuiltIn`-guarded - section 5.9) |
 
 **`info`/`error` share the same stdout stream as everything else** - there is no separate
 log channel. A consumer must treat `type: "info"`/`"error"` as log lines interleaved with
@@ -604,6 +605,18 @@ still not coming back after this fix, the next step is a symmetric redesign - ex
 re-query and reactivate the specific external path(s) instead of the blunt
 `SDC_TOPOLOGY_EXTEND` auto-topology switch, mirroring `DisableExternalDisplays` in reverse -
 not implemented, since it's unverifiable without a real external monitor to test against.
+
+**`DisableExternalDisplays` had the mirror-image bug on the BLOCK side, confirmed via a real
+deployment's own event log**: a `result == 0` return from `SetDisplayConfig`/`SetDisplayConfigPaths`
+was trusted as proof the external path actually went dark, but on at least one real machine it did
+not - a `monitor_blocked` event fired for a monitor that stayed visibly on, while the identical CCD
+call used by `EnableExternalDisplays` failed with `0x1F` on every attempt in that same session
+(section 10 has the full incident). Fixed with a `VerifyExternalDisplaysOff()` re-query (fresh
+`QDC_ONLY_ACTIVE_PATHS`, not the stale pre-mutation arrays) after either success-reporting branch -
+read-only, so it carries none of the internal-panel risk a mutating retry would. Confirmed live
+against the real connected monitor via a standalone reflection harness: the fix caught the false
+positive on the first attempt (`DisableExternalDisplays` correctly reported `ok=false` where the old
+code would have reported `ok=true`).
 
 `WM_DISPLAYCHANGE` is debounced 800ms (`DisplayMonitor.OnDisplayChanged`) because Windows
 fires it repeatedly while HDMI-audio interfaces cycle during a topology switch. The
@@ -1248,12 +1261,17 @@ lines look the way they do, so a future change does not accidentally reintroduce
   (peripheral -> HID child) with no intermediate layer analogous to BLE's `BTHLEDEVICE\`.
   Verify with `Get-PnpDevice | Where-Object { $_.InstanceId -match '^BTHENUM' }` against a
   real classic-paired device before trusting this path blind.
-- **Display restore may still need a symmetric-reactivation redesign.** The confirmed
-  `EnableExternalDisplays` bug (section 5.6/10) is fixed, but if `SDC_TOPOLOGY_EXTEND` itself
-  turns out not to reliably reactivate a path `DisableExternalDisplays` deliberately dropped
-  from the CCD database, the next step is re-querying and explicitly reactivating the specific
-  external path(s) instead of the blunt auto-topology switch - not implemented, unverifiable
-  without a real external monitor.
+- **Display restore may still need a symmetric-reactivation redesign - no longer just
+  theoretical, confirmed reproducible on real hardware.** The confirmed `EnableExternalDisplays`
+  bug (section 5.6/10) is fixed (it now returns the real result instead of hardcoding `ok = true`),
+  but `SDC_TOPOLOGY_EXTEND` itself was observed failing with `0x1F` on 100% of attempts across a
+  real incident's session AND on a later live re-test on that same machine - i.e. the return-code
+  fix correctly reports the failure, but nothing yet makes the restore actually succeed on this
+  class of hardware. The next step is re-querying and explicitly reactivating the specific external
+  path(s) instead of the blunt auto-topology switch, mirroring the read-only verification approach
+  `DisableExternalDisplays` now uses on the block side (section 5.6) - not implemented, since a
+  mutating retry strategy needs a real external monitor exhibiting this exact failure to iterate
+  against safely, not just to detect the problem.
 - **No packaging/installer.** There is no MSI/installer project, no service-registration
   script, and no documented uninstall procedure in this repo. Whatever runs this binary
   as a persistent Windows service, and whatever cleans up OS-persistent state on removal

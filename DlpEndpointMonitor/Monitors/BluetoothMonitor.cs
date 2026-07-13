@@ -103,16 +103,17 @@ sealed class BluetoothMonitor : IDisposable
             foreach (var device in _enumerateBluetoothDevices())
             {
                 checked_++;
-                bool allowed = _whitelist.IsAllowed(device.Mac, device.Kind)
-                            && !_blacklist.IsBlocked(device.Mac, device.Kind);
+                bool blacklisted = _blacklist.IsBlocked(device.Mac, device.Kind);
+                bool allowed = _whitelist.IsAllowed(device.Mac, device.Kind) && !blacklisted;
                 if (!allowed)
                 {
                     blocked++;
+                    string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
                     EventEmitter.EmitInfo($"bt_policy_apply: {device.Mac} kind={device.Kind} allowed={allowed}");
                     string mac  = device.Mac;
                     DeviceKind kind = device.Kind;
                     string name = device.Name;
-                    Task.Run(() => BlockDevice(mac, kind, name));
+                    Task.Run(() => BlockDevice(mac, kind, name, reason));
                 }
             }
             EventEmitter.EmitInfo($"bt_policy_apply: checked {checked_} device(s), blocking {blocked}");
@@ -125,10 +126,14 @@ sealed class BluetoothMonitor : IDisposable
 
     void HandleArrival(string mac, DeviceKind kind, string name)
     {
-        bool allowed = _whitelist.IsAllowed(mac, kind) && !_blacklist.IsBlocked(mac, kind);
+        bool blacklisted = _blacklist.IsBlocked(mac, kind);
+        bool allowed = _whitelist.IsAllowed(mac, kind) && !blacklisted;
         EventEmitter.Emit(new BluetoothDeviceConnectedEvent(mac, kind, name, allowed, EventEmitter.Ts()));
         if (!allowed)
-            Task.Run(() => BlockDevice(mac, kind, name));
+        {
+            string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
+            Task.Run(() => BlockDevice(mac, kind, name, reason));
+        }
     }
 
     /// <summary>
@@ -140,12 +145,12 @@ sealed class BluetoothMonitor : IDisposable
     /// software re-pairability: an unpaired device has no record here and cannot be restored by
     /// <see cref="RestoreCompliant"/> when policy loosens - the user must manually re-pair it.
     /// </summary>
-    void BlockDevice(string mac, DeviceKind kind, string name)
+    void BlockDevice(string mac, DeviceKind kind, string name, string reason)
     {
         var (ok, error) = BluetoothActions.RemovePairing(mac);
         IEvent ev = ok
-            ? new BluetoothDeviceBlockedEvent(mac, kind, name, EventEmitter.Ts())
-            : new BluetoothDeviceBlockFailedEvent(mac, kind, name, error, EventEmitter.Ts());
+            ? new BluetoothDeviceBlockedEvent(mac, kind, name, reason, EventEmitter.Ts())
+            : new BluetoothDeviceBlockFailedEvent(mac, kind, name, reason, error, EventEmitter.Ts());
         EventEmitter.Emit(ev);
     }
 

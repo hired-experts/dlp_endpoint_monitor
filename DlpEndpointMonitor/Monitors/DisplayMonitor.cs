@@ -140,8 +140,8 @@ sealed class DisplayMonitor : IDisposable
 
     void HandleArrival(ParsedDevice parsed)
     {
-        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                    && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
 
         EventEmitter.Emit(new MonitorConnectedEvent(
             string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
@@ -149,7 +149,10 @@ sealed class DisplayMonitor : IDisposable
             parsed.RawPath, EventEmitter.Ts()));
 
         if (!allowed)
-            Task.Run(() => BlockAllExternal(parsed));
+        {
+            string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
+            Task.Run(() => BlockAllExternal(parsed, reason));
+        }
     }
 
     /// <summary>
@@ -161,13 +164,13 @@ sealed class DisplayMonitor : IDisposable
         try
         {
             int checked_ = 0;
-            var nonCompliant = new List<ParsedDevice>();
+            var nonCompliant = new List<(ParsedDevice device, string reason)>();
             foreach (var parsed in DisplayActions.EnumerateConnected())
             {
                 checked_++;
-                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                            && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
-                if (!allowed) nonCompliant.Add(parsed);
+                bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
+                if (!allowed) nonCompliant.Add((parsed, blacklisted ? "blacklist_match" : "whitelist_gate"));
             }
 
             if (nonCompliant.Count > 0)
@@ -180,14 +183,14 @@ sealed class DisplayMonitor : IDisposable
                 // re-check triggered by a policy change or a projection-mode switch (via
                 // DisplayChangeRelay) must not degrade to only the aggregate info line below, or the
                 // agent/dashboard has no per-device audit event to key off of for this path.
-                foreach (var parsed in nonCompliant)
+                foreach (var (parsed, reason) in nonCompliant)
                 {
                     string? vid = string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid;
                     string? pid = string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid;
 
                     IEvent ev = ok
-                        ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, EventEmitter.Ts())
-                        : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, error, EventEmitter.Ts());
+                        ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, reason, EventEmitter.Ts())
+                        : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, reason, error, EventEmitter.Ts());
 
                     EventEmitter.Emit(ev);
                 }
@@ -232,7 +235,7 @@ sealed class DisplayMonitor : IDisposable
         }
     }
 
-    async Task BlockAllExternal(ParsedDevice parsed)
+    async Task BlockAllExternal(ParsedDevice parsed, string reason)
     {
         try
         {
@@ -247,8 +250,8 @@ sealed class DisplayMonitor : IDisposable
             string? pid = string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid;
 
             IEvent ev = ok
-                ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, EventEmitter.Ts())
-                : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, error, EventEmitter.Ts());
+                ? new MonitorBlockedEvent(vid, pid, parsed.RawPath, reason, EventEmitter.Ts())
+                : new MonitorBlockFailedEvent(vid, pid, parsed.RawPath, reason, error, EventEmitter.Ts());
 
             EventEmitter.Emit(ev);
         }
@@ -257,7 +260,7 @@ sealed class DisplayMonitor : IDisposable
             EventEmitter.Emit(new MonitorBlockFailedEvent(
                 string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
                 string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid,
-                parsed.RawPath, ex.Message, EventEmitter.Ts()));
+                parsed.RawPath, reason, ex.Message, EventEmitter.Ts()));
         }
     }
 

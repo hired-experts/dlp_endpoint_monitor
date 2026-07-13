@@ -169,16 +169,27 @@ sealed class UsbMonitor : IDisposable
                 IReadOnlyList<ParsedDevice>? siblings =
                     parsed.GroupId is not null && byGroup.TryGetValue(parsed.GroupId, out var s) ? s : null;
 
-                bool allowed = siblings is not null
-                    ? IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked
-                    : _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                        && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                // blacklisted mirrors "allowed"'s own group-vs-single-device branching, computed
+                // alongside it (not re-derived later) so a group-blocked verdict is credited to
+                // whichever sibling actually matched, never re-derived from parsed alone.
+                bool allowed, blacklisted;
+                if (siblings is not null)
+                {
+                    allowed = IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked;
+                    blacklisted = anyBlocked;
+                }
+                else
+                {
+                    blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                    allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
+                }
 
                 if (!allowed)
                 {
                     blocked++;
+                    string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
                     EventEmitter.EmitInfo($"usb_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
-                    Task.Run(() => BlockDevice(parsed, siblings));
+                    Task.Run(() => BlockDevice(parsed, reason, siblings));
                 }
             }
             EventEmitter.EmitInfo($"usb_policy_apply: checked {checked_} device(s), blocking {blocked}");
@@ -262,8 +273,9 @@ sealed class UsbMonitor : IDisposable
 
     void HandleArrival(ParsedDevice parsed)
     {
-        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                    && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
+        string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
 
         var connectedEvent = new UsbDeviceConnectedEvent(
             string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
@@ -291,11 +303,11 @@ sealed class UsbMonitor : IDisposable
 
         if (!allowed)
         {
-            Task.Run(() => BlockDevice(parsed));
+            Task.Run(() => BlockDevice(parsed, reason));
         }
     }
 
-    void BlockDevice(ParsedDevice parsed, IReadOnlyList<ParsedDevice>? knownGroupSiblings = null)
+    void BlockDevice(ParsedDevice parsed, string reason, IReadOnlyList<ParsedDevice>? knownGroupSiblings = null)
     {
         // SAFETY (criterion 5): never block a built-in keyboard / touchpad / pointing device -
         // disabling or ejecting it would brick local input on a laptop, and an eject is
@@ -305,7 +317,7 @@ sealed class UsbMonitor : IDisposable
         {
             var protectedFailedEvent = new UsbDeviceBlockFailedEvent(
                 parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind,
-                parsed.ClassGuid, parsed.GroupId, parsed.InstanceId,
+                parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, reason,
                 "protected internal input device (built-in keyboard/touchpad) - refused to block",
                 null, EventEmitter.Ts());
 
@@ -343,6 +355,11 @@ sealed class UsbMonitor : IDisposable
                     "- a sibling interface satisfies whitelist, skipping block");
                 return;
             }
+
+            // This live re-check is more authoritative than whatever reason the caller passed in
+            // (which may be stale by the time this Task.Run body actually executes) - same
+            // never-trust-a-single-interface principle as the compliance check just above.
+            reason = groupBlocked ? "blacklist_match" : "whitelist_gate";
         }
 
         // Track the exact devnode that ends up disabled so restore can re-enable it by
@@ -440,14 +457,14 @@ sealed class UsbMonitor : IDisposable
         // interface, and each type needs its own real EventId as ResolveGroupAnchor's candidate.
         if (ok)
         {
-            var blockedEvent = new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, null, EventEmitter.Ts());
+            var blockedEvent = new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, reason, null, EventEmitter.Ts());
             string? anchor = ResolveGroupAnchor(parsed.GroupId, blockedEvent.EventId);
             if (anchor is not null) blockedEvent = blockedEvent with { SourceEventId = anchor };
             EventEmitter.Emit(blockedEvent);
         }
         else
         {
-            var failedEvent = new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, error, null, EventEmitter.Ts());
+            var failedEvent = new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, reason, error, null, EventEmitter.Ts());
             string? anchor = ResolveGroupAnchor(parsed.GroupId, failedEvent.EventId);
             if (anchor is not null) failedEvent = failedEvent with { SourceEventId = anchor };
             EventEmitter.Emit(failedEvent);

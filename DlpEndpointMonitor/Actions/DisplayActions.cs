@@ -95,9 +95,14 @@ static class DisplayActions
             result = NativeMethods.SetDisplayConfig(
                 0, IntPtr.Zero, 0, IntPtr.Zero,
                 NativeMethods.SDC_APPLY | NativeMethods.SDC_TOPOLOGY_INTERNAL);
-            return result == 0
-                ? (true, null)
-                : (false, $"SetDisplayConfig(INTERNAL) failed: 0x{result:X}");
+            if (result != 0)
+                return (false, $"SetDisplayConfig(INTERNAL) failed: 0x{result:X}");
+
+            // A live incident showed a 0 return code here is not proof the switch took: the
+            // identical EXTEND call failed with 0x1F on every attempt in the same session on
+            // this machine's CCD/driver stack, and a monitor_blocked event fired for a monitor
+            // that was still on. Re-query before trusting the return code.
+            return VerifyExternalDisplaysOff();
         }
 
         // Collect mode indices still referenced by active paths
@@ -140,9 +145,43 @@ static class DisplayActions
             NativeMethods.SDC_SAVE_TO_DATABASE |
             NativeMethods.SDC_ALLOW_CHANGES);
 
-        return result == 0
-            ? (true, null)
-            : (false, $"SetDisplayConfig failed: 0x{result:X}");
+        if (result != 0)
+            return (false, $"SetDisplayConfig failed: 0x{result:X}");
+
+        // Same false-positive-success risk as the INTERNAL-topology branch above - a 0 return
+        // code from this call was not sufficient evidence on the machine this bug was found on.
+        return VerifyExternalDisplaysOff();
+    }
+
+    /// <summary>
+    /// Fresh re-query of the currently active paths after a SetDisplayConfig call that itself
+    /// reported success, since that return code alone was proven unreliable on real hardware
+    /// (see the callers above) - confirms no non-internal path is still active before this
+    /// function is allowed to report the disable as having actually worked.
+    /// </summary>
+    static (bool ok, string? error) VerifyExternalDisplaysOff()
+    {
+        int result = NativeMethods.GetDisplayConfigBufferSizes(
+            NativeMethods.QDC_ONLY_ACTIVE_PATHS, out uint numPaths, out uint numModes);
+        if (result != 0)
+            return (false, $"post-disable verification failed: GetDisplayConfigBufferSizes returned 0x{result:X}");
+
+        var paths = new DisplayConfigPathInfo[numPaths];
+        var modes = new DisplayConfigModeInfo[numModes];
+
+        result = NativeMethods.QueryDisplayConfig(
+            NativeMethods.QDC_ONLY_ACTIVE_PATHS,
+            ref numPaths, paths, ref numModes, modes, IntPtr.Zero);
+        if (result != 0)
+            return (false, $"post-disable verification failed: QueryDisplayConfig returned 0x{result:X}");
+
+        for (int i = 0; i < (int)numPaths; i++)
+        {
+            if (paths[i].targetInfo.outputTechnology != NativeMethods.DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL)
+                return (false, "SetDisplayConfig reported success but an external display is still active");
+        }
+
+        return (true, null);
     }
 
     /// <summary>

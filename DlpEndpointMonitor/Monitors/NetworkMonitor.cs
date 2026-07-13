@@ -114,13 +114,14 @@ sealed class NetworkMonitor : IDisposable
             foreach (var parsed in UsbActions.EnumerateConnected().Where(p => p.Kind == DeviceKind.Network))
             {
                 checked_++;
-                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                            && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
                 if (!allowed)
                 {
                     blocked++;
+                    string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
                     EventEmitter.EmitInfo($"net_policy_apply: {parsed.Vid}/{parsed.Pid} kind={parsed.Kind} allowed={allowed}");
-                    Task.Run(() => BlockDevice(parsed));
+                    Task.Run(() => BlockDevice(parsed, reason));
                 }
             }
             EventEmitter.EmitInfo($"net_policy_apply: checked {checked_} device(s), blocking {blocked}");
@@ -133,8 +134,8 @@ sealed class NetworkMonitor : IDisposable
 
     void HandleArrival(ParsedDevice parsed)
     {
-        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
-                    && !_blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+        bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
 
         EventEmitter.Emit(new NetworkDeviceConnectedEvent(
             string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
@@ -148,7 +149,10 @@ sealed class NetworkMonitor : IDisposable
             EventEmitter.Ts()));
 
         if (!allowed)
-            Task.Run(() => BlockDevice(parsed));
+        {
+            string reason = blacklisted ? "blacklist_match" : "whitelist_gate";
+            Task.Run(() => BlockDevice(parsed, reason));
+        }
     }
 
     /// <summary>
@@ -157,12 +161,12 @@ sealed class NetworkMonitor : IDisposable
     /// applies to a NIC. The IsBuiltIn check MUST run before any disable attempt: the
     /// machine's own WiFi/Ethernet adapter is exactly as essential as a built-in keyboard.
     /// </summary>
-    void BlockDevice(ParsedDevice parsed)
+    void BlockDevice(ParsedDevice parsed, string reason)
     {
         if (UsbActions.IsBuiltIn(parsed.InstanceId))
         {
             EventEmitter.Emit(new NetworkDeviceBlockFailedEvent(
-                parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId,
+                parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId, reason,
                 "protected internal network adapter - refused to block",
                 EventEmitter.Ts()));
             return;
@@ -173,8 +177,8 @@ sealed class NetworkMonitor : IDisposable
             _disabled.Add(new DisabledDeviceRecord(parsed.InstanceId, parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind));
 
         IEvent ev = ok
-            ? new NetworkDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId, EventEmitter.Ts())
-            : new NetworkDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId, error, EventEmitter.Ts());
+            ? new NetworkDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId, reason, EventEmitter.Ts())
+            : new NetworkDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.InstanceId, reason, error, EventEmitter.Ts());
 
         EventEmitter.Emit(ev);
     }

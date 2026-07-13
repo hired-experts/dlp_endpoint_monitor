@@ -953,6 +953,61 @@ what is and is not covered and why.
   alerting is wired in and fires repeatedly over weeks of uptime. Fixed with `using var process =
   Process.Start(...)` - disposes the .NET wrapper/handle deterministically; does not kill or wait on
   the launched child, which keeps running independently exactly as before.
+- **Every `*_blocked`/`*_block_failed` event pair, across all five policy domains, now carries a
+  `Reason` field - exactly `"blacklist_match"` or `"whitelist_gate"`, never a third value.**
+  Prompted by a user audit asking whether a block/block-failed event says WHICH policy caused it -
+  previously only `ClipboardContentBlockedEvent` did (via `Reason`/`MatchedPattern`, and even that
+  was missing from `ClipboardContentBlockFailedEvent` despite both values already being computed in
+  scope at that call site - a one-line fix). `Reason` answers "which list caused this"; the
+  pre-existing `Error` field is unchanged and continues to answer "why did the enforcement action
+  itself fail" - the two are orthogonal and must not be conflated (a `Reason` of `"blacklist_match"`
+  with a populated `Error` means: this device WAS correctly targeted for blocking, but the block
+  action itself failed for the reason in `Error`). No third `"protected_internal"` reason value was
+  added for the built-in-keyboard/adapter safety refusals in `UsbMonitor`/`NetworkMonitor` - those
+  still report whichever of the two policy reasons triggered the block ATTEMPT; `Error` already
+  explains the refusal itself (e.g. `"protected internal input device..."`). For USB specifically,
+  `Reason` is RE-DERIVED inside `UsbMonitor.BlockDevice` from the live group-compliance re-check
+  (`IsGroupCompliant`'s `groupBlocked` out-param) when a composite group applies, rather than trusting
+  the caller's earlier single-interface guess - same never-trust-a-single-interface-in-isolation
+  principle this file already documents elsewhere. `DisplayMonitor.BlockNonCompliant`'s per-monitor
+  loop carries each monitor's own `Reason` alongside it (a list of `(ParsedDevice, string reason)`
+  tuples), not one shared value applied to the whole non-compliant batch. No new NuGet dependency, no
+  wire-shape change beyond the one new field per record - `Vid`/`Pid`/`Mac`/`InstanceId`/etc. and
+  `Error` are all unchanged.
+- **[fixed - confirmed via real machine logs and a live reflection test against the actual
+  connected monitor] `DisplayActions.DisableExternalDisplays()` could report success
+  (`MonitorBlockedEvent`) for a monitor that was never actually turned off - a real incident, not a
+  theoretical one.** A live event log on a real deployment (`C:\ProgramData\DLP\agent.db`) showed a
+  `monitor_blocked` event fire for an external HDMI monitor (vid `MSI`, pid `3CB6`) that stayed
+  visibly on, while the identical `SetDisplayConfig` call used by `EnableExternalDisplays` (the
+  restore direction) failed with Win32 error `0x1F` (`ERROR_GEN_FAILURE`) on every single attempt in
+  that same session - proof this machine's CCD/driver stack does not always make a `SetDisplayConfig`
+  return code trustworthy on its own. Both of `DisableExternalDisplays`' success-reporting branches
+  (the `SDC_TOPOLOGY_INTERNAL` "second-screen-only" fallback and the main
+  `SetDisplayConfigPaths(..., SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE |
+  SDC_ALLOW_CHANGES)` call) trusted `result == 0` alone as proof the external display actually went
+  dark. Fixed by adding a private `VerifyExternalDisplaysOff()` helper - a FRESH
+  `QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS)` re-query (not reusing the stale pre-mutation
+  paths/modes arrays) run after either success branch, which only lets the function report
+  `(true, null)` if no non-internal path is still active; otherwise it returns
+  `(false, "SetDisplayConfig reported success but an external display is still active")`. This is
+  READ-ONLY (no new `SetDisplayConfig` call) and deliberately does not touch the
+  `if (!anyExternal) return (true, null)` early-return (a query that finds nothing external to
+  block in the first place is still an honest, true success) or `EnableExternalDisplays()` itself
+  (its return-code-based failure reporting was already correct - it consistently and correctly
+  failed in the incident logs; only the DISABLE/block direction had a false-positive-success gap).
+  `DisplayMonitor.cs`/`DisplayCompanionRelay.cs`/`Program.cs` needed ZERO changes - they already
+  branch correctly on `DisableExternalDisplays`' own `(ok, error)` tuple, and this function already
+  runs in the correct session either way (called directly, or via the companion's `executeCommand`
+  delegate), so the verification query is automatically session-correct too. Confirmed live via a
+  standalone reflection harness (bypassing `Program.cs`/stdin/companion entirely, to avoid
+  disturbing the two real production instances already running on the test machine) that called the
+  actual fixed `DisableExternalDisplays()` against the real connected monitor: it correctly returned
+  `ok=false` with the new verification message on the first attempt - the exact false-positive this
+  fix targets, caught live. Separately, repeated `EnableExternalDisplays()` calls on that same
+  machine still failed with the identical `0x1F` - a pre-existing, reproducible limitation of that
+  machine's CCD/driver stack this fix does not (and cannot) resolve; it only ensures the event stream
+  never lies about whether the block actually took effect.
 
 ---
 
@@ -962,6 +1017,7 @@ what is and is not covered and why.
 |---|---|
 | What commands exist and their arg shapes | `Commands/Commands.cs` |
 | What events exist and their payload shapes | `Core/EventEmitter.cs` |
+| What `Reason` means on a `*_blocked`/`*_block_failed` event, and how it differs from `Error` | `Core/EventEmitter.cs` (the 5 domains' Blocked/BlockFailed records), `Monitors/UsbMonitor.cs` (`BlockDevice`'s group-reason re-derivation), `Monitors/DisplayMonitor.cs` (`BlockNonCompliant`'s per-monitor reason), section 10 |
 | The full enum vocabulary (events, commands, device kinds) | `Core/Enums.cs` |
 | How a stdin line becomes a handler call | `Core/CommandDispatcher.cs` |
 | How whitelist/blacklist enable/disable/mutate interact | `Handlers/Windows/WindowsUsbProtectionHandler.cs` |

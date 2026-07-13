@@ -99,7 +99,7 @@ sealed class ClipboardMonitor : IDisposable
         if (ClipboardActions.Clear())
             EventEmitter.Emit(new ClipboardContentBlockedEvent(content.Operation, kind.Value, reason!, matchedPattern, changeEvent.EventId, EventEmitter.Ts()));
         else
-            EventEmitter.Emit(new ClipboardContentBlockFailedEvent(content.Operation, kind.Value, "failed to clear clipboard", changeEvent.EventId, EventEmitter.Ts()));
+            EventEmitter.Emit(new ClipboardContentBlockFailedEvent(content.Operation, kind.Value, reason!, matchedPattern, "failed to clear clipboard", changeEvent.EventId, EventEmitter.Ts()));
     }
 
     /// <summary>
