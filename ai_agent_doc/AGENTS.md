@@ -154,7 +154,9 @@ DlpEndpointMonitor/
                               keystroke if it violates policy (paste enforcement layer - fails
                               OPEN on any error, see section 10)
   Actions/                    stateless Win32 P/Invoke helpers, no policy logic
-    UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle
+    UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle,
+                              IsMassStorageDevice/CompatibleIdsIndicateMassStorage (Compatible-IDs-based
+                              mass-storage detection feeding usb_storage_kill_switch_blocked, section 10)
     BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing - the primary
                               block action), path/CoD parsing
     DisplayActions.cs         QueryDisplayConfig/SetDisplayConfig(Paths) topology juggling
@@ -1079,6 +1081,7 @@ what is and is not covered and why.
 | Why a headless primary missed pure projection-mode switches, and the relay that fixes it | `Core/DisplayChangeRelay.cs`, `Monitors/DisplayMonitor.cs` (`NotifyExternalDisplayChange`), AGENTS.md section 10 |
 | What Win+P mode is currently active, and the event reporting it | `Actions/DisplayActions.cs` (`GetCurrentTopology`, `MapTopologyId`), `Monitors/DisplayMonitor.cs` (`EmitProjectionChanged`), `monitor_projection_changed` in PROJECT.md section 2.2 |
 | How network adapters are matched/blocked/restored, and how the built-in NIC is protected | `Monitors/NetworkMonitor.cs`, `Actions/UsbActions.cs` (`IsBuiltIn`) |
+| How the USB storage kill switch's new visibility event works | `Actions/UsbActions.cs` (`IsMassStorageDevice`), `ai_agent_doc/PROJECT.md` section 5.7 |
 | Windows interface GUID -> DeviceKind mapping | `Core/UsbKind.cs` |
 | The Win32 message pump / STA requirement | `Core/MessageWindow.cs`, `Program.cs` |
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |

@@ -96,6 +96,12 @@ want that automated later - not proposed for now, since you asked for no code.
 | T-USB-06 | `ParsePartialDevice` on a non-empty working path, any `kind` including `Unknown` | Returns a non-null `ParsedDevice` with `Vid=Pid=""` - **regression guard for the fail-closed fix**: must never go back to returning `null` for `Unknown` |
 | T-USB-07 | `ParsePartialDevice` on a working path that reduces to empty string | Returns `null` (the one remaining legitimate null case) |
 | T-USB-08 | Case sensitivity: `VID_046d&PID_c52b` (lowercase hex) | Parses identically to uppercase, values normalized to uppercase |
+| T-USB-09 | `ParseDevicePath` on a real BLE HID device's instance ID with an embedded GATT-service GUID segment right after the enumerator name (a second `#{guid}` before the trailing interface-class GUID) | Keeps the full instance ID (`HID\{...}_Dev_VID&...\9&...`) rather than truncating at the first `#{guid}` match down to just `"HID"` - regression guard for a real production bug that silently misclassified a live-arriving BLE mouse |
+| T-USB-10 | `CompatibleIdsIndicateMassStorage` with a real Windows-generated compatible-ID list for a USB mass-storage device (`"USB\Class_08&SubClass_06&Prot_50"`, `"...Class_08&SubClass_06"`, `"...Class_08"`, decreasing specificity) | Returns `true` |
+| T-USB-11 | `CompatibleIdsIndicateMassStorage` with a HID-class (`Class_03`) compatible-ID list | Returns `false` - no false positive on a non-storage USB class |
+| T-USB-12 | `CompatibleIdsIndicateMassStorage` with an empty array | Returns `false`, no exception |
+| T-USB-13 | `CompatibleIdsIndicateMassStorage` with a `null` array, and with `null`/empty entries mixed alongside a real matching entry | `null` array -> `false`; `null`/empty entries are skipped (not matched), real match alongside them still -> `true` |
+| T-USB-14 | `CompatibleIdsIndicateMassStorage` with a lowercase `"class_08"` token | Returns `true` - confirms `OrdinalIgnoreCase` matching |
 
 ### 2.3 Bluetooth parsing/decoding (`Actions/BluetoothActions.cs`)
 
@@ -357,6 +363,7 @@ test script - what to set up, what to trigger, what to check in the JSON event s
 | M-REG-06 | Whitelist AND blacklist both somehow enabled on disk (direct file edit) | Start the process | Both force-disabled at startup, `startup_conflict` error event emitted |
 | M-REG-07 | Whitelist enabled with entries, then `device_whitelist_clear` | Observe | List disabled (not just emptied) - "factory reset" semantics - and all previously-blocked devices get restored |
 | M-REG-08 | `usb_disable_storage`/`usb_enable_storage`/`usb_storage_status` | Toggle each | `HKLM\...\USBSTOR!Start` flips between `4`/`3` correctly - **this one IS runnable in CI on any Windows agent**, no special hardware needed (plain registry read/write) |
+| M-USB-STOR-01 (kill switch visibility event) | `usb_disable_storage` active (confirm via `usb_storage_status` -> `enabled: false`) | Plug in a real USB flash drive/external HDD | `usb_storage_kill_switch_blocked` fires with the correct `vid`/`pid`/`instanceId`, alongside the existing `usb_device_connected` event for the same arrival (`Kind=Unknown`, since USBSTOR never binds a storage driver to expose the storage-specific interface GUIDs - PROJECT.md section 5.7) - Win32/live-hardware-only per section 1's feasibility table, not automatable |
 
 ### 3.4 Bluetooth reversible blocking + Display restore (this session's fix)
 

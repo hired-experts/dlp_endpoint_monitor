@@ -258,6 +258,20 @@ public record UsbStorageStatusEvent(string? Id, bool Ok, bool Enabled) : IEvent
     public long Ts { get; } = EventEmitter.Ts();
 }
 
+// Purely OBSERVATIONAL, not an enforcement action - there is no CM_Disable_DevNode call behind
+// this event. Windows itself already refused to bind a storage driver before this process had
+// any say (the USBSTOR service's Start value was 4 at the time this device's driver would have
+// loaded), so there is no "block failed" counterpart possible - same reasoning as
+// ScreenshotBlockedEvent's deliberate lack of a *_block_failed sibling. Fired by UsbMonitor as an
+// independent, additive check alongside (never instead of) the normal whitelist/blacklist arrival
+// evaluation - see UsbMonitor.HandleArrival and PROJECT.md section 5.7.
+[JsonDiscriminant(EventType.UsbStorageKillSwitchBlocked)]
+public record UsbStorageKillSwitchBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
+{
+    public EventType Type => EventType.UsbStorageKillSwitchBlocked;
+    public string EventId { get; } = EventEmitter.NewEventId();
+}
+
 [JsonDiscriminant(EventType.DeviceProtectionStatus)]
 public record DeviceProtectionStatusEvent(string? Id, bool Ok, ProtectionMode Mode, string? Error = null) : IEvent
 {

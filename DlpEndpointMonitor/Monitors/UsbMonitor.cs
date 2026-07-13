@@ -301,6 +301,22 @@ sealed class UsbMonitor : IDisposable
 
         EventEmitter.Emit(connectedEvent);
 
+        // Purely observational, independent of the whitelist/blacklist decision above - never
+        // gates or changes `allowed`/`reason`, and fires regardless of what Kind resolved to.
+        // A mass-storage device connecting while USBSTOR is disabled never binds a storage
+        // driver, so it resolves as DeviceKind.Unknown here (see Core/UsbKind.cs) rather than
+        // DeviceKind.Storage - IsMassStorageDevice reads Compatible IDs directly off the devnode
+        // to detect this case, since Kind alone cannot. See PROJECT.md section 5.7.
+        if (!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId))
+        {
+            EventEmitter.Emit(new UsbStorageKillSwitchBlockedEvent(
+                string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,
+                string.IsNullOrEmpty(parsed.Pid) ? null : parsed.Pid,
+                parsed.Serial,
+                parsed.InstanceId,
+                EventEmitter.Ts()));
+        }
+
         if (!allowed)
         {
             Task.Run(() => BlockDevice(parsed, reason));

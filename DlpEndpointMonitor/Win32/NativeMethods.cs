@@ -283,6 +283,23 @@ static class NativeMethods
         ref uint pulLength,
         uint     ulFlags);
 
+    // Same native entry point as above, re-declared with a byte[] buffer instead of a single
+    // uint out-param - needed for Compatible IDs (CM_DRP_COMPATIBLEIDS), a REG_MULTI_SZ (a
+    // variable-length sequence of null-terminated strings), which cannot be marshaled through
+    // the DWORD-typed overload IsRemovable depends on. pulLength is the buffer's byte capacity
+    // on input, the actual byte length written on output - same in/out convention as the DWORD
+    // overload's pulLength. A fixed 4KB caller buffer (see UsbActions.IsMassStorageDevice) is
+    // used rather than the classic two-call growable-buffer idiom, matching this file's existing
+    // "generously-sized fixed buffer" convention (see SP_DEVICE_INTERFACE_DETAIL_DATA_W).
+    [DllImport("cfgmgr32.dll", EntryPoint = "CM_Get_DevNode_Registry_PropertyW")]
+    public static extern uint CM_Get_DevNode_Registry_PropertyW_MultiSz(
+        uint     dnDevInst,
+        uint     ulProperty,
+        out uint pulRegDataType,
+        byte[]   Buffer,
+        ref uint pulLength,
+        uint     ulFlags);
+
     // ── Constants ─────────────────────────────────────────────────────────────
 
     // Messages
@@ -339,6 +356,19 @@ static class NativeMethods
     // EXPECT_NO_REMOVAL. Used to keep the laptop's own keyboard/touchpad unblockable.
     public const uint CM_DRP_REMOVAL_POLICY                   = 0x00000021;
     public const uint CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL     = 1;
+
+    // Compatible IDs (CM_Get_DevNode_Registry_PropertyW, REG_MULTI_SZ): decreasing-specificity
+    // class/subclass/protocol strings (e.g. "USB\Class_08&SubClass_06&Prot_50"), used to detect
+    // USB mass-storage class without needing a bound driver/interface GUID (see
+    // UsbActions.IsMassStorageDevice - USBSTOR-disabled devices never expose GUID_DEVINTERFACE_DISK).
+    // Confirmed 0x00000003 against Microsoft's own Windows SDK cfgmgr32.h (10.0.10240.0, mirrored at
+    // github.com/tpn/winsdk-10), cross-checked against ReactOS/Wine/mingw-w64's independently
+    // maintained cfgmgr32.h mirrors (all agree). Sanity-checked against this file's own
+    // CM_DRP_REMOVAL_POLICY=0x21 - the same header lists CM_DRP_REMOVAL_POLICY_HW_DEFAULT (not
+    // CM_DRP_REMOVAL_POLICY itself, which is 0x20) at 0x21; IsRemovable's live-hardware behavior
+    // confirms 0x21 is the one that actually returns a populated policy, so this is the same
+    // enumeration/header this file has always used.
+    public const uint CM_DRP_COMPATIBLEIDS                    = 0x00000003;
 
     // setupapi
     public const uint DIGCF_PRESENT         = 0x00000002;

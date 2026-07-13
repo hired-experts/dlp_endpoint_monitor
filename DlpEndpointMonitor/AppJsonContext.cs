@@ -51,6 +51,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(UsbDeviceUnblockedEvent))]
 [JsonSerializable(typeof(UsbDeviceUnblockFailedEvent))]
 [JsonSerializable(typeof(UsbStorageStatusEvent))]
+[JsonSerializable(typeof(UsbStorageKillSwitchBlockedEvent))]
 [JsonSerializable(typeof(WhitelistEntryDto[]))]
 [JsonSerializable(typeof(DeviceWhitelistGetEvent))]
 [JsonSerializable(typeof(DeviceBlacklistGetEvent))]

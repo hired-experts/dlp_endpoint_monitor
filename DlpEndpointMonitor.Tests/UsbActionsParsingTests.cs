@@ -135,4 +135,55 @@ public class UsbActionsParsingTests
             @"HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b020_REV&0009_d15799812be8&Col01\9&3b0d97de&0&0000",
             parsed.InstanceId);
     }
+
+    // T-USB-10: real Windows-generated compatible-ID list for a USB mass-storage device,
+    // decreasing specificity - the most-specific entry alone is enough to match.
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_RealMassStorageIds_ReturnsTrue()
+    {
+        string[] ids = ["USB\\Class_08&SubClass_06&Prot_50", "USB\\Class_08&SubClass_06", "USB\\Class_08"];
+
+        Assert.True(UsbActions.CompatibleIdsIndicateMassStorage(ids));
+    }
+
+    // T-USB-11: a non-storage class (HID, 0x03) must not false-positive.
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_HidClassIds_ReturnsFalse()
+    {
+        string[] ids = ["USB\\Class_03&SubClass_01&Prot_02", "USB\\Class_03&SubClass_01", "USB\\Class_03"];
+
+        Assert.False(UsbActions.CompatibleIdsIndicateMassStorage(ids));
+    }
+
+    // T-USB-12: empty array - no crash, no false positive.
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_EmptyArray_ReturnsFalse()
+    {
+        Assert.False(UsbActions.CompatibleIdsIndicateMassStorage([]));
+    }
+
+    // T-USB-13: null array itself, and null/empty entries mixed in with a real match - must
+    // never throw, and a null/empty entry must simply be skipped rather than matching.
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_NullArray_ReturnsFalse()
+    {
+        Assert.False(UsbActions.CompatibleIdsIndicateMassStorage(null));
+    }
+
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_NullAndEmptyEntriesMixedWithMatch_ReturnsTrue()
+    {
+        string?[] ids = [null, "", "USB\\Class_08&SubClass_06&Prot_50"];
+
+        Assert.True(UsbActions.CompatibleIdsIndicateMassStorage(ids));
+    }
+
+    // T-USB-14: case-insensitivity - lowercase "class_08" must still match.
+    [Fact]
+    public void CompatibleIdsIndicateMassStorage_LowercaseClassToken_StillMatches()
+    {
+        string[] ids = ["usb\\class_08&subclass_06&prot_50"];
+
+        Assert.True(UsbActions.CompatibleIdsIndicateMassStorage(ids));
+    }
 }

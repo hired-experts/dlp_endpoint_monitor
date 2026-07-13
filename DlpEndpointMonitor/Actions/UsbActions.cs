@@ -311,6 +311,67 @@ static class UsbActions
         return policy != NativeMethods.CM_REMOVAL_POLICY_EXPECT_NO_REMOVAL;
     }
 
+    /// <summary>
+    /// Pure string check: does this Compatible IDs list indicate USB mass-storage class (0x08)?
+    /// Windows-generated compatible IDs for mass storage look like "USB\Class_08&SubClass_06&Prot_50",
+    /// "USB\Class_08&SubClass_06", "USB\Class_08" (decreasing specificity) - a case-insensitive
+    /// substring check for "Class_08" is sufficient and matches this file's existing preference
+    /// for simple, robust string checks over brittle exact-format parsing. No Win32 involved, so
+    /// this is fully unit-testable (unlike <see cref="IsMassStorageDevice"/> below).
+    /// </summary>
+    public static bool CompatibleIdsIndicateMassStorage(IEnumerable<string?>? compatibleIds)
+    {
+        if (compatibleIds is null) return false;
+
+        foreach (string? id in compatibleIds)
+        {
+            if (!string.IsNullOrEmpty(id) && id.Contains("Class_08", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Purely observational check: is this devnode USB mass-storage class, regardless of whether
+    /// its storage driver actually bound? Used to report a device that arrived while the USBSTOR
+    /// kill switch is off (<see cref="IsUsbStorageEnabled"/>) - see <c>UsbMonitor.HandleArrival</c>.
+    /// Reads Compatible IDs directly off the devnode rather than relying on Kind/ClassGuid, since a
+    /// mass-storage device connecting with USBSTOR disabled never binds a storage driver and so
+    /// never exposes GUID_DEVINTERFACE_DISK/CDROM - it resolves to DeviceKind.Unknown via the
+    /// generic GUID_DEVINTERFACE_USB_DEVICE interface instead (see Core/UsbKind.cs), which carries
+    /// no class information of its own.
+    /// On ANY failure (device not locatable, registry read fails) this returns false - fails closed
+    /// toward "don't claim it's storage", the opposite direction from IsRemovable's fail-toward-
+    /// "internal" default, because this check is purely informational (no enforcement decision rides
+    /// on it) rather than a safety gate. Must never throw: a devnode registry read failing here must
+    /// not take down the message thread that called it.
+    /// </summary>
+    public static bool IsMassStorageDevice(string instanceId)
+    {
+        try
+        {
+            uint cr = NativeMethods.CM_Locate_DevNodeW(out uint devNode, instanceId, NativeMethods.CM_LOCATE_DEVNODE_NORMAL);
+            if (cr != NativeMethods.CR_SUCCESS) return false;
+
+            var buffer = new byte[4096];
+            uint len = (uint)buffer.Length;
+            cr = NativeMethods.CM_Get_DevNode_Registry_PropertyW_MultiSz(
+                devNode, NativeMethods.CM_DRP_COMPATIBLEIDS, out _, buffer, ref len, 0);
+            if (cr != NativeMethods.CR_SUCCESS || len == 0) return false;
+
+            // REG_MULTI_SZ: consecutive null-terminated UTF-16 strings, ending in an extra
+            // trailing null - split on '\0' and drop the empty entries that produces.
+            string raw = Encoding.Unicode.GetString(buffer, 0, (int)len);
+            string[] ids = raw.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+
+            return CompatibleIdsIndicateMassStorage(ids);
+        }
+        catch {
+            return false;
+        }
+    }
+
     // True if any ancestor devnode is on a Bluetooth enumerator (BTHENUM\, BTHLE\, BTHLEDEVICE\).
     // A wireless HID device's own instance id (e.g. HID\{00001812-...}) does not say "BTH" - the
     // Bluetooth origin is on a parent node - so we walk the tree.

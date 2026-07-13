@@ -193,6 +193,7 @@ Every event has a `type` field (the JSON discriminant). Table: `type` value, C# 
 | `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, reason` ("blacklist_match"/"whitelist_gate"), `sourceEventId?, error?(failed only), ts` | After a block attempt. `reason` says which policy caused it (re-derived from the live composite-group check when one applies, section 10); `error` (failed only) says why the action itself failed - the two are orthogonal |
 | `usb_device_unblocked` / `usb_device_unblock_failed` | `UsbDeviceUnblockedEvent` / `UnblockFailedEvent` | `vid?, pid?, serial?, kind, instanceId, sourceEventId?, error?(failed only), ts` | During `RestoreCompliant` |
 | `usb_storage_status` | `UsbStorageStatusEvent` | `id?, ok, enabled` | Reply to `usb_storage_status` |
+| `usb_storage_kill_switch_blocked` | `UsbStorageKillSwitchBlockedEvent` | `vid?, pid?, serial?, instanceId, ts` | A confirmed mass-storage-class device (Compatible IDs contain `Class_08`) connects while `usb_disable_storage` is active - purely observational, no block action of its own to report success/failure on (section 5.7) |
 | `device_protection_status` | `DeviceProtectionStatusEvent` | `id?, ok, mode, error?` | Reply to `device_protection_status`, also usable standalone |
 | `device_whitelist_get` / `device_blacklist_get` | `DeviceWhitelistGetEvent` / `DeviceBlacklistGetEvent` | `id?, ok, enabled, entries: WhitelistEntryDto[]` | Reply to the `_get` commands |
 | `monitor_connected` / `monitor_disconnected` | `MonitorConnectedEvent` / `DisconnectedEvent` | `vid?, pid?, devicePath, ts` | External monitor interface arrival/removal (`vid`/`pid` = EDID manufacturer/product code) |
@@ -714,6 +715,36 @@ Independent of the per-device whitelist/blacklist mechanism entirely:
 (disabled) - this is an all-USB-mass-storage on/off switch, driven by the
 `usb_disable_storage`/`usb_enable_storage`/`usb_storage_status` commands, not by the
 protection-status commands.
+
+**`usb_storage_kill_switch_blocked` gives this switch visibility when it's actually doing
+something.** Flipping `USBSTOR!Start` to `4` stops Windows from ever binding a storage driver
+to a newly-arriving mass-storage device, but until this event existed that was invisible -
+`UsbMonitor.HandleArrival` still fires the normal `usb_device_connected` for the interface
+Windows DOES expose (see below), and nothing said "this was actually a flash drive/external
+HDD that the kill switch just neutralized." `UsbActions.IsMassStorageDevice(instanceId)` reads
+the devnode's Compatible IDs (`CM_DRP_COMPATIBLEIDS`) directly and delegates to the pure
+`CompatibleIdsIndicateMassStorage` (a case-insensitive substring check for `"Class_08"`, the
+USB mass-storage class code) to confirm the device really is mass-storage-class, independent
+of whatever `Kind` it resolved to. `UsbMonitor.HandleArrival` emits
+`UsbStorageKillSwitchBlockedEvent` right after the normal `usb_device_connected` event whenever
+`!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId)` is
+true - purely observational, it never gates or changes `allowed`/`reason` and fires regardless
+of whitelist/blacklist state, because Windows itself already refused to load USBSTOR before
+this process had any say in the matter: there is no block action here for this process to
+attempt, succeed, or fail at, so there is no `usb_storage_kill_switch_block_failed`
+counterpart, the same reasoning as `ScreenshotBlockedEvent` having no failure counterpart
+(section 5.11) - swallowing a keystroke and observing an already-Windows-refused driver bind
+both have no failure mode of their own to report.
+
+Such a device is usually `Kind=Unknown` in the `usb_device_connected` event reported moments
+earlier for the same arrival - not `Kind=Storage` - because the storage-specific interface
+GUIDs (`GUID_DEVINTERFACE_DISK`, `GUID_DEVINTERFACE_CDROM`, etc.) are never exposed without a
+storage driver bound, and with USBSTOR disabled no storage driver ever binds. The generic
+`GUID_DEVINTERFACE_USB_DEVICE` interface still fires regardless, since that one is registered
+by the USB bus stack itself the moment the device enumerates, independent of which (if any)
+function driver eventually binds to it - that's the interface `UsbMonitor` sees arrive, and it
+carries no class information of its own, which is exactly why `IsMassStorageDevice` reads
+Compatible IDs off the devnode directly rather than trusting `Kind`/`ClassGuid`.
 
 ### 5.8 Unclassifiable devices fail closed under whitelist
 
@@ -1606,6 +1637,7 @@ can carry a blank string despite the compile-time non-nullable signature.
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | Persisted state file format/location | `Core/UsbDeviceList.cs`, `Core/DisabledDevices.cs` |
+| How the USB storage kill switch's new visibility event works | `Actions/UsbActions.cs` (`IsMassStorageDevice`), section 5.7 |
 | The Alert Host delivery mechanism (session-crossing launch, mutex/pipe singleton, queueing, visual design) | section 11, `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/` |
 | How screenshot-shortcut blocking works and its scope limits | `Monitors/KeyboardHook.cs` (`HandleScreenshotShortcut`), `Core/ScreenshotBlockPolicy.cs`, section 5.11 |
 | The short operating guide | `ai_agent_doc/AGENTS.md` |
