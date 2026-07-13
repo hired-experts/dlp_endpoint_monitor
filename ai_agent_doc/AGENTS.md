@@ -129,6 +129,10 @@ DlpEndpointMonitor/
     ClipboardOperationHint.cs correlates KeyboardHook's Ctrl+X detection with ClipboardMonitor's
                               next clipboard read, so a text cut reports "cut" instead of
                               ClipboardActions.TryReadText()'s hardcoded "copy" - see section 10
+    ScreenshotBlockPolicy.cs  single-boolean persisted policy (enable/disable only, no entries)
+                              for the OS-native screenshot-shortcut block; KeyboardHook reads
+                              IsEnabled, deliberately not wired into reset_all_policy - see
+                              PROJECT.md section 5.11
     MessageWindow.cs          hidden Win32 window + message pump (clipboard/device/display events)
     JsonDiscriminantAttribute.cs   maps an enum value to the JSON field it discriminates on
     EmitsEventAttribute.cs    documents which event a command replies with (used by SchemaExporter)
@@ -171,7 +175,10 @@ DlpEndpointMonitor/
                               IControlHandler)
     Windows/                  the concrete Windows implementation of each handler interface, incl.
                               WindowsClipboardProtectionHandler.cs (clipboard whitelist/blacklist
-                              mutations - deliberately does NOT force-disable the other list)
+                              mutations - deliberately does NOT force-disable the other list),
+                              WindowsScreenshotProtectionHandler.cs (screenshot_block_enable/
+                              disable/status - bare enable/disable, no entries, see PROJECT.md
+                              section 5.11)
   Win32/
     NativeMethods.cs          every P/Invoke signature and Win32 struct/constant used above
   AppJsonContext.cs           System.Text.Json source-gen context for events + persisted state
@@ -644,6 +651,21 @@ what is and is not covered and why.
   opposite of `IsProtectedInternal`/`IsRemovable`'s fail-**closed** defaults in device blocking
   (section 10's other entries, PROJECT.md section 5.1) - do not port that fail-closed instinct
   onto the paste path, or a bad regex from an operator can brick paste system-wide.
+- **PrintScreen must be checked on both keydown and keyup - some keyboards/drivers only ever
+  deliver one of the two edges for this specific key** (a well-known historical BIOS/SysRq-era
+  quirk), so `KeyboardHook.HandleScreenshotShortcut` evaluates whichever edge actually arrives
+  rather than assuming keydown. `_snapshotKeyDown` dedupes the case where both edges DO fire, so
+  a physical keypress is still reported/blocked exactly once either way - do not "simplify" this
+  back down to a keydown-only check, or a keyboard that only sends keyup will silently stop being
+  detected at all. Alt+PrintScreen and Win+Alt+PrintScreen share this same dual-edge handling
+  (same `VK_SNAPSHOT`); Win+Shift+S needs none of it (single keydown edge, like Ctrl+C/X/V/Z
+  above). This is a new capability, not a bug fix - same category of honest limitation as the
+  paste-blocking bullet above applies here too: it is a `WH_KEYBOARD_LL` keystroke hook, so it
+  can only ever see the four OS-native keystroke shortcuts it's built for. Right-click/menu-driven
+  capture, the Start-Menu-launched Snipping Tool, and any third-party screenshot or
+  screen-recording tool are all completely outside what any keyboard hook can observe - see
+  PROJECT.md section 5.11 for the full writeup and the explicitly-deferred broader-coverage
+  options (process-launch blocking, `WDA_EXCLUDEFROMCAPTURE`).
 - **Showing a UI alert from this binary always requires crossing into a different Windows
   session, and `STARTUPINFO.lpDesktop` is the easy way to get that silently wrong.** This
   binary may run as a LocalSystem service in Session 0, which has no desktop at all - a WPF
@@ -1062,6 +1084,7 @@ what is and is not covered and why.
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | How a UI alert reaches the interactive session, and why | `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/App.xaml.cs`, `ai_agent_doc/PROJECT.md` section 11 |
+| How screenshot-shortcut blocking works and its scope limits | `Monitors/KeyboardHook.cs`, `ai_agent_doc/PROJECT.md` section 5.11 |
 | Deep design, protocol tables, principles, roadmap | `ai_agent_doc/PROJECT.md` |
 | The validation gate to run before a commit | AGENTS.md section 8.1 |
 | What's unit-testable today vs. hardware-only, and the full test case list | `ai_agent_doc/TEST-PLAN.md` |

@@ -28,6 +28,7 @@ if (args.Contains("--session-companion"))
         var cbWhitelist = new ClipboardWhitelist();
         var cbBlacklist = new ClipboardBlacklist();
         var cbCutHint   = new ClipboardOperationHint();
+        var cbScreenshotBlockPolicy = new ScreenshotBlockPolicy();
 
         // Construct the two companion-HOSTED relay servers FIRST, before the blocking relayClient
         // connect below. The primary fires its own ~2s connect retries at these servers almost
@@ -79,7 +80,7 @@ if (args.Contains("--session-companion"))
             {
                 using var window       = new MessageWindow();
                 using var clipboardMon = new ClipboardMonitor(window, cbWhitelist, cbBlacklist, cbCutHint);
-                using var keyboardHook = new KeyboardHook(cbWhitelist, cbBlacklist, cbCutHint);
+                using var keyboardHook = new KeyboardHook(cbWhitelist, cbBlacklist, cbCutHint, cbScreenshotBlockPolicy);
 
                 companionReady.Set();
                 EventEmitter.EmitInfo("clipboard companion ready");
@@ -149,6 +150,7 @@ if (args.Contains("--session-companion"))
         const int ReloadDebounceMs = 300;
         using var whitelistReload = new Timer(_ => cbWhitelist.Reload(), null, Timeout.Infinite, Timeout.Infinite);
         using var blacklistReload = new Timer(_ => cbBlacklist.Reload(), null, Timeout.Infinite, Timeout.Infinite);
+        using var screenshotBlockReload = new Timer(_ => cbScreenshotBlockPolicy.Reload(), null, Timeout.Infinite, Timeout.Infinite);
 
         void OnStorageChanged(object sender, FileSystemEventArgs e)
         {
@@ -156,6 +158,8 @@ if (args.Contains("--session-companion"))
                 whitelistReload.Change(ReloadDebounceMs, Timeout.Infinite);
             else if (string.Equals(e.Name, "clipboard-blacklist.json", StringComparison.OrdinalIgnoreCase))
                 blacklistReload.Change(ReloadDebounceMs, Timeout.Infinite);
+            else if (string.Equals(e.Name, "screenshot-block.json", StringComparison.OrdinalIgnoreCase))
+                screenshotBlockReload.Change(ReloadDebounceMs, Timeout.Infinite);
         }
 
         // FileSystemWatcher throws ArgumentException if the directory doesn't exist yet - a real
@@ -205,6 +209,7 @@ var disabled  = new DisabledDevices();
 var clipboardWhitelist = new ClipboardWhitelist();
 var clipboardBlacklist = new ClipboardBlacklist();
 var clipboardCutHint   = new ClipboardOperationHint();
+var screenshotBlockPolicy = new ScreenshotBlockPolicy();
 
 // Conflict guard: if both lists were enabled on disk (e.g. direct file edit), disable both.
 // The client can query device_protection_status to understand the current state.
@@ -375,7 +380,7 @@ var msgThread = new Thread(() =>
         if (runClipboardLocally)
         {
             clipboardMonitor = new ClipboardMonitor(window, clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
-            keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist, clipboardCutHint);
+            keyboardHook     = new KeyboardHook(clipboardWhitelist, clipboardBlacklist, clipboardCutHint, screenshotBlockPolicy);
         }
         using var cbMon            = clipboardMonitor;
         using var kbHook           = keyboardHook;
@@ -434,7 +439,8 @@ var dispatcher = new CommandDispatcher(
     control:           new WindowsControlHandler(stopCompanion,
         whitelist, blacklist, clipboardWhitelist, clipboardBlacklist,
         restoreDevices: RestoreDevices, clipboardReevaluate: ReevaluateClipboard),
-    alert:             new WindowsAlertHandler());
+    alert:             new WindowsAlertHandler(),
+    screenshotProtection: new WindowsScreenshotProtectionHandler(screenshotBlockPolicy));
 
 try
 {

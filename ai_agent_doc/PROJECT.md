@@ -145,6 +145,9 @@ C# record (`Commands/Commands.cs`), extra fields, what it replies with.
 | `ping` | `PingCmd` | - | `ReplyEvent` |
 | `shutdown` | `ShutdownCmd` | - | `ReplyEvent`, then `Environment.Exit(0)` |
 | `reset_all_policy` | `ResetAllPolicyCmd` | - | `ReplyEvent` |
+| `screenshot_block_enable` | `ScreenshotBlockEnableCmd` | - | `ReplyEvent` |
+| `screenshot_block_disable` | `ScreenshotBlockDisableCmd` | - | `ReplyEvent` |
+| `screenshot_block_status` | `ScreenshotBlockStatusCmd` | - | `ScreenshotBlockStatusEvent` (`[EmitsEvent]`) |
 
 `DeviceEntryDto(vid?, pid?, serial?, mac?, kind?, label?)` is the shared shape used inside
 every `*_set` command's `entries` array.
@@ -195,7 +198,9 @@ Every event has a `type` field (the JSON discriminant). Table: `type` value, C# 
 | `monitor_connected` / `monitor_disconnected` | `MonitorConnectedEvent` / `DisconnectedEvent` | `vid?, pid?, devicePath, ts` | External monitor interface arrival/removal (`vid`/`pid` = EDID manufacturer/product code) |
 | `monitor_blocked` / `monitor_block_failed` | `MonitorBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, devicePath, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After `DisableExternalDisplays` - emitted both on a fresh non-compliant arrival AND per non-compliant monitor found during `BlockNonCompliant()`'s re-check (policy change or a projection-mode switch relayed via `DisplayChangeRelay`), not just arrival (section 10). Each monitor in a `BlockNonCompliant` batch carries its OWN `reason`, not one shared value |
 | `monitor_projection_changed` | `MonitorProjectionChangedEvent` | `kind ("internal"|"clone"|"extend"|"external"|"unknown"), ts` | `WM_DISPLAYCHANGE` settles (800ms debounce) - which Win+P mode is now active, read via `DisplayActions.GetCurrentTopology` |
-| `keyboard_shortcut` | `KeyboardShortcutEvent` | `action ("copy"|"cut"|"paste"|"undo"), ts` | Ctrl+C/X/V/Z detected (reporting only, never blocks the key) |
+| `keyboard_shortcut` | `KeyboardShortcutEvent` | `action ("copy"|"cut"|"paste"|"undo"|"screenshot"), ts` | Ctrl+C/X/V/Z, or one of the four screenshot shortcuts (section 5.11), detected (reporting only, never blocks the key by itself) |
+| `screenshot_block_status` | `ScreenshotBlockStatusEvent` | `id?, ok, enabled` | Reply to `screenshot_block_status` - shape mirrors `usb_storage_status`'s bare-boolean reply (no entry list, section 5.11) |
+| `screenshot_blocked` | `ScreenshotBlockedEvent` | `shortcut, ts` | A screenshot shortcut was actually swallowed - fires only when `ScreenshotBlockPolicy.IsEnabled`, always alongside (never instead of) the unconditional `keyboard_shortcut` report for the same keypress. No `screenshot_block_failed` counterpart: swallowing a keystroke is just returning non-zero instead of calling `CallNextHookEx`, which has no failure mode the way a Win32 disable/unpair call does (section 5.11) |
 | `bluetooth_device_connected` / `_disconnected` | `BluetoothDeviceConnectedEvent` / `DisconnectedEvent` | `mac, kind, name, allowed(connect only), ts` | Paired BT device arrival/removal |
 | `bluetooth_device_blocked` / `_block_failed` | `BluetoothDeviceBlockedEvent` / `BlockFailedEvent` | `mac, kind, name, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After `RemovePairing` |
 | `network_device_blocked` / `network_device_block_failed` | `NetworkDeviceBlockedEvent` / `BlockFailedEvent` | `vid?, pid?, serial?, instanceId, reason` ("blacklist_match"/"whitelist_gate"), `error?(failed only), ts` | After a block attempt (`UsbActions.IsBuiltIn`-guarded - section 5.9) |
@@ -882,6 +887,68 @@ always pass through untouched regardless of policy state - this is a deliberate 
 "Paste", Shift+Insert, and an application's own Paste button/API all bypass the low-level
 keyboard hook entirely and are not blocked by this feature - see the bug-history entry below.
 
+### 5.11 Screenshot-shortcut blocking (separate again from both device blocking and clipboard content - `Core/ScreenshotBlockPolicy.cs`, `Monitors/KeyboardHook.cs`)
+
+A third structurally distinct policy, alongside device blocking (4-5.9) and clipboard content
+(5.10). Read this subsection before touching `Core/ScreenshotBlockPolicy.cs` or
+`KeyboardHook.HandleScreenshotShortcut`.
+
+**Policy model: bare enable/disable, no entries.** `ScreenshotBlockPolicy` is a single
+persisted boolean (`screenshot-block.json` under `StorageLocation.Default`, same
+`ReaderWriterLockSlim` + atomic-temp-file-write shape as every other list in this codebase) -
+not a `UsbDeviceList`/`ClipboardRuleList` subclass, because there is nothing to match: the
+policy swallows the four OS-native screenshot shortcuts outright whenever enabled, the same
+"kill switch" shape as `usb_disable_storage`/`usb_enable_storage`/`usb_storage_status`, not
+the whitelist/blacklist-entry shape. `screenshot_block_enable`/`screenshot_block_disable`/
+`screenshot_block_status` (`Handlers/Windows/WindowsScreenshotProtectionHandler.cs`) mirror
+that command trio exactly.
+
+**Deliberately NOT wired into `reset_all_policy`.** AGENTS.md's "Policy list completeness"
+rule only applies to `UsbDeviceList`/`ClipboardRuleList` subclasses - `ResetAllPolicyCmd_
+HandlerConstructorCoversEveryPolicyListType` (`WindowsControlHandlerTests.cs`) reflects over
+exactly those two base types, and `ScreenshotBlockPolicy` is neither. `reset_all_policy`'s
+documented scope (section 2.1) is "clear all four whitelist/blacklist-style lists" - a bare
+enable/disable switch with no entries to clear is a different shape entirely (there is
+nothing for a "clear" semantic to mean here), so it is intentionally left out rather than
+silently included under a rule that does not describe it. If this policy ever grows entries
+of its own, it would need its own explicit decision about `reset_all_policy`, not an
+automatic one inherited from this rule.
+
+**Shortcuts covered, and why PrintScreen needs a dual keydown/keyup check.**
+`KeyboardHook.HandleScreenshotShortcut` detects four OS-native shortcuts: PrintScreen alone,
+Alt+PrintScreen, Win+Alt+PrintScreen, and Win+Shift+S. PrintScreen (`VK_SNAPSHOT`) is checked
+on BOTH `WM_KEYDOWN`/`WM_SYSKEYDOWN` and the corresponding keyup - it is a well-known quirk
+that some keyboards/drivers only deliver ONE of the two edges for this specific key (a
+historical BIOS/SysRq-era carryover), so whichever edge actually arrives is the one evaluated
+and (when enabled) swallowed. `_snapshotKeyDown` dedupes the case where both edges DO fire, so
+a physical keypress is reported exactly once either way: keydown sets the flag and reports;
+the matching keyup sees the flag already set and only resets it (no second report); a
+keyup-only keyboard never sets the flag on keydown (because keydown never arrives), so the
+keyup branch reports once itself. Win+Shift+S needs no such dedup - it is detected on a single
+keydown edge of its final key (`S`), the same shape as this file's existing Ctrl+C/X/V/Z
+detection.
+
+**Two-tier signal, same shape as clipboard's copy/cut layer (5.10).** Every detected shortcut
+unconditionally emits `KeyboardShortcutEvent("screenshot", ...)` - regardless of whether the
+block policy is enabled, mirroring copy/cut/paste/undo's existing always-report behavior
+above. Only when `ScreenshotBlockPolicy.IsEnabled` does the same keypress additionally emit
+`ScreenshotBlockedEvent(shortcut, ts)` and cause `Callback` to return non-zero without calling
+`CallNextHookEx`, swallowing the keystroke before any application (including Windows' own
+Snipping Tool/clipboard) sees it. There is no `ScreenshotBlockFailedEvent` - unlike a Win32
+disable/unpair call, "swallow this keystroke" cannot fail in a way worth reporting.
+
+**Scope limitation - read before assuming this covers "screenshots" in general.** This
+mechanism covers ONLY Windows' own built-in keystroke-triggered screenshot shortcuts. It does
+**NOT** detect or block: the Snipping Tool launched from the Start Menu/search (no keystroke
+involved), any third-party screenshot or screen-recording tool, or any other non-keystroke
+capture trigger. Windows itself exposes no generic "a screenshot was taken" event that any of
+those paths could be hooked into - there is no OS-level notification independent of the input
+action that triggers it, the same structural gap this file already documents for paste (5.10).
+Broader coverage - process-launch blocking of known screenshot/recording tools, or
+`SetWindowDisplayAffinity`/`WDA_EXCLUDEFROMCAPTURE` to make this process's own windows
+uncapturable by anything - was discussed and deliberately deferred as a separate, larger
+feature; it is not implemented here.
+
 ---
 
 ## 6. Persistence
@@ -1540,4 +1607,5 @@ can carry a blank string despite the compile-time non-nullable signature.
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | Persisted state file format/location | `Core/UsbDeviceList.cs`, `Core/DisabledDevices.cs` |
 | The Alert Host delivery mechanism (session-crossing launch, mutex/pipe singleton, queueing, visual design) | section 11, `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/` |
+| How screenshot-shortcut blocking works and its scope limits | `Monitors/KeyboardHook.cs` (`HandleScreenshotShortcut`), `Core/ScreenshotBlockPolicy.cs`, section 5.11 |
 | The short operating guide | `ai_agent_doc/AGENTS.md` |

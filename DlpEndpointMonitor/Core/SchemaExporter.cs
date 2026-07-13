@@ -12,7 +12,7 @@ static class SchemaExporter
     static readonly Type[] SharedEventTypes =
     [
         typeof(EventType), typeof(DeviceKind), typeof(ClipboardKind), typeof(ProtectionMode),
-        typeof(WhitelistEntryDto),
+        typeof(KeyboardShortcutAction), typeof(WhitelistEntryDto),
     ];
 
     static readonly Type[] SharedCommandTypes =

@@ -46,6 +46,8 @@ public enum EventType
     [JsonStringEnumMemberName("monitor_blocked")]                MonitorBlocked,
     [JsonStringEnumMemberName("monitor_block_failed")]           MonitorBlockFailed,
     [JsonStringEnumMemberName("monitor_projection_changed")]     MonitorProjectionChanged,
+    [JsonStringEnumMemberName("screenshot_block_status")]        ScreenshotBlockStatus,
+    [JsonStringEnumMemberName("screenshot_blocked")]              ScreenshotBlocked,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
@@ -94,6 +96,9 @@ public enum CommandType
     [JsonStringEnumMemberName("shutdown")]               Shutdown,
     [JsonStringEnumMemberName("reset_all_policy")]       ResetAllPolicy,
     [JsonStringEnumMemberName("show_alert")]             ShowAlert,
+    [JsonStringEnumMemberName("screenshot_block_enable")]  ScreenshotBlockEnable,
+    [JsonStringEnumMemberName("screenshot_block_disable")] ScreenshotBlockDisable,
+    [JsonStringEnumMemberName("screenshot_block_status")]  ScreenshotBlockStatus,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<DeviceKind>))]
@@ -147,4 +152,14 @@ public enum ProtectionMode
     [JsonStringEnumMemberName("blacklist")] Blacklist,
     [JsonStringEnumMemberName("none")]      None,
     [JsonStringEnumMemberName("conflict")]  Conflict,
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter<KeyboardShortcutAction>))]
+public enum KeyboardShortcutAction
+{
+    [JsonStringEnumMemberName("copy")]       Copy,
+    [JsonStringEnumMemberName("cut")]        Cut,
+    [JsonStringEnumMemberName("paste")]      Paste,
+    [JsonStringEnumMemberName("undo")]       Undo,
+    [JsonStringEnumMemberName("screenshot")] Screenshot,
 }

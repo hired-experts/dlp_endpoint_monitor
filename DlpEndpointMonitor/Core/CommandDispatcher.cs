@@ -7,33 +7,36 @@ namespace DlpEndpointMonitor.Core;
 
 sealed class CommandDispatcher
 {
-    readonly CancellationToken           _cancellationToken;
-    readonly IClipboardHandler           _clipboard;
-    readonly IUsbStorageHandler          _usbStorage;
-    readonly IUsbDeviceHandler           _usbDevice;
-    readonly IUsbProtectionHandler       _usbProtection;
-    readonly IClipboardProtectionHandler _clipboardProtection;
-    readonly IControlHandler             _control;
-    readonly IAlertHandler               _alert;
+    readonly CancellationToken            _cancellationToken;
+    readonly IClipboardHandler            _clipboard;
+    readonly IUsbStorageHandler           _usbStorage;
+    readonly IUsbDeviceHandler            _usbDevice;
+    readonly IUsbProtectionHandler        _usbProtection;
+    readonly IClipboardProtectionHandler  _clipboardProtection;
+    readonly IControlHandler              _control;
+    readonly IAlertHandler                _alert;
+    readonly IScreenshotProtectionHandler _screenshotProtection;
 
     public CommandDispatcher(
-        CancellationToken           cancellationToken,
-        IClipboardHandler           clipboard,
-        IUsbStorageHandler          usbStorage,
-        IUsbDeviceHandler           usbDevice,
-        IUsbProtectionHandler       usbProtection,
-        IClipboardProtectionHandler clipboardProtection,
-        IControlHandler             control,
-        IAlertHandler               alert)
+        CancellationToken            cancellationToken,
+        IClipboardHandler            clipboard,
+        IUsbStorageHandler           usbStorage,
+        IUsbDeviceHandler            usbDevice,
+        IUsbProtectionHandler        usbProtection,
+        IClipboardProtectionHandler  clipboardProtection,
+        IControlHandler              control,
+        IAlertHandler                alert,
+        IScreenshotProtectionHandler screenshotProtection)
     {
-        _cancellationToken   = cancellationToken;
-        _clipboard           = clipboard;
-        _usbStorage          = usbStorage;
-        _usbDevice           = usbDevice;
-        _usbProtection       = usbProtection;
-        _clipboardProtection = clipboardProtection;
-        _control             = control;
-        _alert               = alert;
+        _cancellationToken    = cancellationToken;
+        _clipboard            = clipboard;
+        _usbStorage           = usbStorage;
+        _usbDevice            = usbDevice;
+        _usbProtection        = usbProtection;
+        _clipboardProtection  = clipboardProtection;
+        _control              = control;
+        _alert                = alert;
+        _screenshotProtection = screenshotProtection;
     }
 
     public async Task RunAsync()
@@ -138,6 +141,11 @@ sealed class CommandDispatcher
 
                 // ── Alert ─────────────────────────────────────────────────────
                 case CommandType.ShowAlert: _alert.Handle(Deserialize<ShowAlertCmd>(rawJson)); break;
+
+                // ── Screenshot ───────────────────────────────────────────────
+                case CommandType.ScreenshotBlockEnable:  _screenshotProtection.Handle(Deserialize<ScreenshotBlockEnableCmd>(rawJson));  break;
+                case CommandType.ScreenshotBlockDisable: _screenshotProtection.Handle(Deserialize<ScreenshotBlockDisableCmd>(rawJson)); break;
+                case CommandType.ScreenshotBlockStatus:  _screenshotProtection.Handle(Deserialize<ScreenshotBlockStatusCmd>(rawJson));  break;
             }
         }
         catch (Exception ex)

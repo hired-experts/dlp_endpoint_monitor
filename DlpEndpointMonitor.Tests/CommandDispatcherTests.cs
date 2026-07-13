@@ -78,6 +78,13 @@ public class CommandDispatcherTests
         public void Handle(ShowAlertCmd command) => recorder.Record(nameof(ShowAlertCmd), command);
     }
 
+    sealed class FakeScreenshotProtectionHandler(CallRecorder recorder) : IScreenshotProtectionHandler
+    {
+        public void Handle(ScreenshotBlockEnableCmd command) => recorder.Record(nameof(ScreenshotBlockEnableCmd), command);
+        public void Handle(ScreenshotBlockDisableCmd command) => recorder.Record(nameof(ScreenshotBlockDisableCmd), command);
+        public void Handle(ScreenshotBlockStatusCmd command) => recorder.Record(nameof(ScreenshotBlockStatusCmd), command);
+    }
+
     sealed class FakeClipboardProtectionHandler(CallRecorder recorder) : IClipboardProtectionHandler
     {
         public void Handle(ClipboardProtectionStatusCmd command) => recorder.Record(nameof(ClipboardProtectionStatusCmd), command);
@@ -124,7 +131,8 @@ public class CommandDispatcherTests
                 new FakeUsbProtectionHandler(recorder),
                 new FakeClipboardProtectionHandler(recorder),
                 new FakeControlHandler(recorder),
-                new FakeAlertHandler(recorder));
+                new FakeAlertHandler(recorder),
+                new FakeScreenshotProtectionHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();
 
@@ -178,6 +186,7 @@ public class CommandDispatcherTests
             nameof(ClipboardBlacklistEnableCmd), nameof(ClipboardBlacklistDisableCmd), nameof(ClipboardBlacklistGetCmd),
             nameof(ClipboardBlacklistClearCmd), nameof(ClipboardBlacklistAddCmd), nameof(ClipboardBlacklistRemoveCmd), nameof(ClipboardBlacklistSetCmd),
             nameof(PingCmd), nameof(ShutdownCmd),
+            nameof(ScreenshotBlockEnableCmd), nameof(ScreenshotBlockDisableCmd), nameof(ScreenshotBlockStatusCmd),
         ];
 
         string input = string.Join('\n',
@@ -223,6 +232,9 @@ public class CommandDispatcherTests
             """{"id":"39","cmd":"clipboard_blacklist_set","entries":[]}""",
             """{"id":"40","cmd":"ping"}""",
             """{"id":"41","cmd":"shutdown"}""",
+            """{"id":"42","cmd":"screenshot_block_enable"}""",
+            """{"id":"43","cmd":"screenshot_block_disable"}""",
+            """{"id":"44","cmd":"screenshot_block_status"}""",
         ]) + "\n";
 
         var writer = new StringWriter();
@@ -382,7 +394,8 @@ public class CommandDispatcherTests
                 new FakeUsbProtectionHandler(new CallRecorder()),
                 new FakeClipboardProtectionHandler(new CallRecorder()),
                 new FakeControlHandler(new CallRecorder()),
-                new FakeAlertHandler(new CallRecorder()));
+                new FakeAlertHandler(new CallRecorder()),
+                new FakeScreenshotProtectionHandler(new CallRecorder()));
 
             Task runTask = dispatcher.RunAsync();
 
@@ -432,7 +445,8 @@ public class CommandDispatcherTests
                 new FakeUsbProtectionHandler(recorder),
                 new FakeClipboardProtectionHandler(recorder),
                 new FakeControlHandler(recorder),
-                new FakeAlertHandler(recorder));
+                new FakeAlertHandler(recorder),
+                new FakeScreenshotProtectionHandler(recorder));
 
             Task runTask = dispatcher.RunAsync();
             Task completed = await Task.WhenAny(runTask, Task.Delay(TimeSpan.FromSeconds(2)));

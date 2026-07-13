@@ -168,7 +168,7 @@ corruption on whatever machine runs them.
 
 | # | Case | Expected |
 |---|---|---|
-| T-CMD-01 | Well-formed line for every `CommandType`, including all 15 clipboard protection commands (`clipboard_protection_status`, `clipboard_whitelist_*`, `clipboard_blacklist_*`) alongside the pre-existing device commands | Dispatches to the correct fake handler's `Handle` overload, exactly once |
+| T-CMD-01 | Well-formed line for every `CommandType`, including all 15 clipboard protection commands (`clipboard_protection_status`, `clipboard_whitelist_*`, `clipboard_blacklist_*`) and the 3 screenshot-block commands (`screenshot_block_enable`/`_disable`/`_status`, added alongside `ScreenshotBlockPolicy`, PROJECT.md section 5.11) alongside the pre-existing device commands | Dispatches to the correct fake handler's `Handle` overload, exactly once |
 | T-CMD-02 | Malformed JSON (not valid JSON at all) | Emits `reply {ok:false}` with the exception message, does not throw out of `Dispatch` |
 | T-CMD-03 | Valid JSON, missing `cmd` field | Throws inside `Dispatch`'s own try/catch (`GetProperty` throws) -> caught -> `reply {ok:false}` |
 | T-CMD-04 | Valid JSON, unrecognized `cmd` string | `commandType` deserializes to `null` -> `reply {ok:false, error:"unknown command: <cmd>"}`, echoing the unrecognized string and the request `id` |
@@ -414,6 +414,22 @@ to drive each row.
 | M-ALERT-07 (same-session direct launch) | This binary run interactively (not as a service) | Call `ShowAlert` | `Process.GetCurrentProcess().SessionId == WTSGetActiveConsoleSessionId()` is true, so the fast `Process.Start` path is taken - confirm via a debug log/breakpoint that `LaunchIntoSession` is never reached |
 | M-ALERT-08 (real session-crossing launch - the one path that most needs live verification) | This binary genuinely running as the `LocalSystem` service in Session 0 (per the sibling `dlp_v2/agent`'s actual packaging), a real user logged into the console | Call `ShowAlert` | `WTSQueryUserToken`/`DuplicateTokenEx`/`CreateEnvironmentBlock`/`CreateProcessAsUser` all succeed, and the alert window actually appears on the logged-on user's desktop - this is the scenario the `winsta0\\default` `lpDesktop` setting exists for; if it's ever omitted or wrong, this is the row that silently fails (process starts, no visible window, no error) |
 | M-ALERT-09 (no interactive session at all) | LocalSystem service running at the lock screen / before any user has logged in | Call `ShowAlert` | `WTSGetActiveConsoleSessionId()` returns `0xFFFFFFFF` (no console session) or `WTSQueryUserToken` fails - confirm `ShowAlert` returns `(false, "<reason>")` and does not throw or hang |
+
+### 3.8 Screenshot-shortcut blocking (`Monitors/KeyboardHook.cs`, `ai_agent_doc/PROJECT.md` section 5.11)
+
+Requires an interactive desktop session (the low-level keyboard hook is session-scoped) - not
+runnable in a headless CI agent, same caveat as section 3.6's clipboard paste-interception row
+(M-CLIP-04) and consistent with section 1's feasibility table entry for `Monitors/
+ClipboardMonitor.cs`/`KeyboardHook.cs`'s other Win32-calling enforcement methods (`EvaluateAndEnforce`/
+`ApplyPolicy`/`ShouldBlockPaste`): `HandleScreenshotShortcut` is the same kind of live,
+desktop-session-only enforcement decision and is not unit-testable for the same reason - no
+substitution point for the real `GetAsyncKeyState`/hook-callback path.
+
+| # | Setup | Action | Expected |
+|---|---|---|---|
+| M-SCR-01 (block, all four shortcuts) | `screenshot_block_enable` sent (confirm via `screenshot_block_status` -> `enabled: true`) | Press each of PrintScreen, Alt+PrintScreen, Win+Shift+S, and Win+Alt+PrintScreen in turn | Each press is swallowed - Windows' own screenshot tool/clipboard never receives the capture (e.g. a subsequent Ctrl+V pastes nothing new); `keyboard_shortcut` (`action: "screenshot"`) fires for every press regardless; `screenshot_blocked` (`shortcut` matching the specific combo) fires for every press too, since the policy is enabled |
+| M-SCR-02 (disable, unconditional report survives) | Continuing from M-SCR-01, send `screenshot_block_disable` (confirm via `screenshot_block_status` -> `enabled: false`) | Press each of the same four shortcuts again | Each works normally (the capture reaches the clipboard/Snipping Tool as usual); `keyboard_shortcut` (`action: "screenshot"`) still fires for every press; `screenshot_blocked` does NOT fire for any of them |
+| M-SCR-03 (PrintScreen dual-edge dedup, hardware-dependent) | Policy enabled or disabled, either state | Press PrintScreen alone on keyboards/drivers known to deliver only one of keydown/keyup (see PROJECT.md section 5.11) | Exactly one `keyboard_shortcut` report per physical keypress either way - never zero, never two - confirming `_snapshotKeyDown`'s dedup handles whichever edge actually arrives |
 
 ---
 

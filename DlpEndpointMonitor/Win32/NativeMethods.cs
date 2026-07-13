@@ -302,14 +302,21 @@ static class NativeMethods
     public const int  WH_KEYBOARD_LL  = 13;
     public const int  HC_ACTION       = 0;
     public const uint WM_KEYDOWN      = 0x0100;
+    public const uint WM_KEYUP        = 0x0101;
     public const uint WM_SYSKEYDOWN   = 0x0104;
+    public const uint WM_SYSKEYUP     = 0x0105;
     public const uint VK_SHIFT        = 0x10;
     public const uint VK_CONTROL      = 0x11;
+    public const uint VK_MENU         = 0x12; // Alt
     public const uint VK_INSERT       = 0x2D;
     public const uint VK_C            = 0x43;
+    public const uint VK_S            = 0x53;
     public const uint VK_X            = 0x58;
     public const uint VK_V            = 0x56;
     public const uint VK_Z            = 0x5A;
+    public const uint VK_LWIN         = 0x5B;
+    public const uint VK_RWIN         = 0x5C;
+    public const uint VK_SNAPSHOT     = 0x2C; // PrintScreen
 
     // Device change
     public const int  DBT_DEVICEARRIVAL          = 0x8000;

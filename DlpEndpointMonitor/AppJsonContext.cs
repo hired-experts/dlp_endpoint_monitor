@@ -12,6 +12,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(UsbDeviceListState))]
 [JsonSerializable(typeof(DisabledDevicesState))]
 [JsonSerializable(typeof(ClipboardRuleListState))]
+[JsonSerializable(typeof(ScreenshotBlockPolicyState))]
 
 // ── Enums ─────────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(EventType))]
@@ -19,6 +20,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(ClipboardKind))]
 [JsonSerializable(typeof(ProtectionMode))]
 [JsonSerializable(typeof(DisplayTopology))]
+[JsonSerializable(typeof(KeyboardShortcutAction))]
 
 // ── Replies ───────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(ReplyEvent))]
@@ -63,6 +65,10 @@ using System.Text.Json.Serialization;
 
 // ── Keyboard ──────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(KeyboardShortcutEvent))]
+
+// ── Screenshot ────────────────────────────────────────────────────────────────
+[JsonSerializable(typeof(ScreenshotBlockStatusEvent))]
+[JsonSerializable(typeof(ScreenshotBlockedEvent))]
 
 // ── Bluetooth ─────────────────────────────────────────────────────────────────
 [JsonSerializable(typeof(BluetoothDeviceConnectedEvent))]

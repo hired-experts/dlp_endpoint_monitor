@@ -330,9 +330,31 @@ public record MonitorProjectionChangedEvent(DisplayTopology Kind, long Ts) : IEv
 
 #region Keyboard
 [JsonDiscriminant(EventType.KeyboardShortcut)]
-public record KeyboardShortcutEvent(string Action, long Ts) : IEvent
+public record KeyboardShortcutEvent(KeyboardShortcutAction Action, long Ts) : IEvent
 {
     public EventType Type => EventType.KeyboardShortcut;
+    public string EventId { get; } = EventEmitter.NewEventId();
+}
+#endregion
+
+#region Screenshot
+[JsonDiscriminant(EventType.ScreenshotBlockStatus)]
+public record ScreenshotBlockStatusEvent(string? Id, bool Ok, bool Enabled) : IEvent
+{
+    public EventType Type => EventType.ScreenshotBlockStatus;
+    public string EventId { get; } = EventEmitter.NewEventId();
+    public long Ts { get; } = EventEmitter.Ts();
+}
+
+// Shortcut is one of "print_screen", "alt_print_screen", "win_alt_print_screen", "win_shift_s" -
+// see KeyboardHook's screenshot-detection block. Deliberately NO ScreenshotBlockFailedEvent
+// counterpart: unlike a real Win32 disable/unpair call, swallowing a keystroke means simply
+// returning non-zero instead of calling CallNextHookEx - there is no failure mode for that to
+// report, so there is nothing for a *_block_failed sibling to describe.
+[JsonDiscriminant(EventType.ScreenshotBlocked)]
+public record ScreenshotBlockedEvent(string Shortcut, long Ts) : IEvent
+{
+    public EventType Type => EventType.ScreenshotBlocked;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 #endregion

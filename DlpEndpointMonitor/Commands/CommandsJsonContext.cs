@@ -76,4 +76,9 @@ namespace DlpEndpointMonitor.Commands;
 [JsonSerializable(typeof(AlertType))]
 [JsonSerializable(typeof(AlertSeverity))]
 
+// ── Screenshot protection ─────────────────────────────────────────────────────
+[JsonSerializable(typeof(ScreenshotBlockEnableCmd))]
+[JsonSerializable(typeof(ScreenshotBlockDisableCmd))]
+[JsonSerializable(typeof(ScreenshotBlockStatusCmd))]
+
 internal partial class CommandsJsonContext : JsonSerializerContext { }

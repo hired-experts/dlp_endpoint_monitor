@@ -77,3 +77,10 @@ interface IAlertHandler
 {
     void Handle(ShowAlertCmd command);
 }
+
+interface IScreenshotProtectionHandler
+{
+    void Handle(ScreenshotBlockEnableCmd command);
+    void Handle(ScreenshotBlockDisableCmd command);
+    void Handle(ScreenshotBlockStatusCmd command);
+}

@@ -172,3 +172,18 @@ record ResetAllPolicyCmd(string? Id) : ICommand;
 // about (set by the agent) and maps into AlertRequest.Id, the alert-coalescing key AlertHost uses.
 [JsonDiscriminant(CommandType.ShowAlert)]
 record ShowAlertCmd(string? Id, string SourceEventId, string Title, string Message, AlertType Type = AlertType.Toast, AlertSeverity Severity = AlertSeverity.Blocked, int? DurationSeconds = null) : ICommand;
+
+// ── Screenshot protection ─────────────────────────────────────────────────────
+// Enable/disable only, like UsbEnableStorageCmd/UsbDisableStorageCmd/UsbStorageStatusCmd - not
+// DeviceWhitelist/BlacklistCmd's shape. There is no entry list to match against: this policy
+// swallows the OS-native screenshot keyboard shortcuts outright whenever enabled.
+
+[JsonDiscriminant(CommandType.ScreenshotBlockEnable)]
+record ScreenshotBlockEnableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ScreenshotBlockDisable)]
+record ScreenshotBlockDisableCmd(string? Id) : ICommand;
+
+[JsonDiscriminant(CommandType.ScreenshotBlockStatus)]
+[EmitsEvent(EventType.ScreenshotBlockStatus)]
+record ScreenshotBlockStatusCmd(string? Id) : ICommand;

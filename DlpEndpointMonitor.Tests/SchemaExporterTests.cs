@@ -89,7 +89,8 @@ public class SchemaExporterTests
     // and no others. List read directly from Commands/Commands.cs: ClipboardReadCmd,
     // UsbStorageStatusCmd, DeviceProtectionStatusCmd, DeviceWhitelistGetCmd, DeviceBlacklistGetCmd,
     // plus (added alongside clipboard protection) ClipboardProtectionStatusCmd,
-    // ClipboardWhitelistGetCmd, ClipboardBlacklistGetCmd.
+    // ClipboardWhitelistGetCmd, ClipboardBlacklistGetCmd, plus (added alongside screenshot-block
+    // protection) ScreenshotBlockStatusCmd.
     [Fact]
     public void Export_CmdReply_MatchesEmitsEventAttributeUsageExactly()
     {
@@ -108,6 +109,7 @@ public class SchemaExporterTests
             WireName(CommandType.ClipboardProtectionStatus),
             WireName(CommandType.ClipboardWhitelistGet),
             WireName(CommandType.ClipboardBlacklistGet),
+            WireName(CommandType.ScreenshotBlockStatus),
         };
 
         Assert.Equal(expectedKeys, actualKeys);
@@ -121,6 +123,7 @@ public class SchemaExporterTests
         Assert.Equal(WireName(EventType.ClipboardProtectionStatus), cmdReply.GetProperty(WireName(CommandType.ClipboardProtectionStatus)).GetString());
         Assert.Equal(WireName(EventType.ClipboardWhitelistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardWhitelistGet)).GetString());
         Assert.Equal(WireName(EventType.ClipboardBlacklistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardBlacklistGet)).GetString());
+        Assert.Equal(WireName(EventType.ScreenshotBlockStatus), cmdReply.GetProperty(WireName(CommandType.ScreenshotBlockStatus)).GetString());
     }
 
     // T-SCHEMA-04 (regression half): confirm every command WITHOUT [EmitsEvent] really
