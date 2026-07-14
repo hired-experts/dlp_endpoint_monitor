@@ -307,6 +307,7 @@ static class NativeMethods
     public const uint WM_CLIPBOARDUPDATE = 0x031D;
     public const uint WM_DEVICECHANGE    = 0x0219;
     public const uint WM_DISPLAYCHANGE   = 0x007E;
+    public const uint WM_WTSSESSION_CHANGE = 0x02B1;
 
     // Clipboard formats
     public const uint CF_UNICODETEXT  = 13;
@@ -483,6 +484,16 @@ static class NativeMethods
     [DllImport("wtsapi32.dll", SetLastError = true)]
     public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
 
+    // Session-change notifications (WM_WTSSESSION_CHANGE) so the primary can re-derive "what's the
+    // active console session now" itself (via WTSGetActiveConsoleSessionId, above) whenever ANY
+    // session connects/disconnects/logs on/off - not just this process's own session, which in the
+    // real Session-0 deployment never changes. NOTIFY_FOR_ALL_SESSIONS is required for that reason.
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    public static extern bool WTSRegisterSessionNotification(IntPtr hWnd, uint dwFlags);
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    public static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
+
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern bool DuplicateTokenEx(
         IntPtr hExistingToken, uint dwDesiredAccess,
@@ -509,6 +520,11 @@ static class NativeMethods
     public const int  TOKEN_TYPE_PRIMARY           = 1; // TokenPrimary
     public const uint MAXIMUM_ALLOWED              = 0x02000000;
     public const uint CREATE_UNICODE_ENVIRONMENT   = 0x00000400;
+
+    // WTSRegisterSessionNotification dwFlags — NOTIFY_FOR_ALL_SESSIONS (not
+    // NOTIFY_FOR_THIS_SESSION=0), since this process's OWN session never changes in the real
+    // deployment; we need to hear about any OTHER session's transitions too.
+    public const uint NOTIFY_FOR_ALL_SESSIONS = 1;
 }
 
 // ── Bluetooth structs ─────────────────────────────────────────────────────────

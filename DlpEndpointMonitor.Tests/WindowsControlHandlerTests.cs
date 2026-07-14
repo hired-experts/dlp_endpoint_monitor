@@ -38,22 +38,25 @@ public class WindowsControlHandlerTests
         public required DeviceBlacklist DeviceBlacklist;
         public required ClipboardWhitelist ClipboardWhitelist;
         public required ClipboardBlacklist ClipboardBlacklist;
+        public required ScreenshotBlockPolicy ScreenshotBlockPolicy;
         public required CallCounter RestoreDevices;
         public required CallCounter ClipboardReevaluate;
     }
 
     static void WithFixture(Action<Fixture> test) =>
-        WithTempDir(dwDir => WithTempDir(dbDir => WithTempDir(cwDir => WithTempDir(cbDir =>
+        WithTempDir(dwDir => WithTempDir(dbDir => WithTempDir(cwDir => WithTempDir(cbDir => WithTempDir(sbDir =>
         {
             var deviceWhitelist    = new DeviceWhitelist(dwDir);
             var deviceBlacklist    = new DeviceBlacklist(dbDir);
             var clipboardWhitelist = new ClipboardWhitelist(cwDir);
             var clipboardBlacklist = new ClipboardBlacklist(cbDir);
+            var screenshotBlockPolicy = new ScreenshotBlockPolicy(sbDir);
             var restoreDevices     = new CallCounter();
             var clipboardReevaluate = new CallCounter();
             var handler = new WindowsControlHandler(
                 stopCompanion: () => { },
                 deviceWhitelist, deviceBlacklist, clipboardWhitelist, clipboardBlacklist,
+                screenshotBlockPolicy,
                 restoreDevices: restoreDevices.Increment,
                 clipboardReevaluate: clipboardReevaluate.Increment);
 
@@ -64,10 +67,11 @@ public class WindowsControlHandlerTests
                 DeviceBlacklist = deviceBlacklist,
                 ClipboardWhitelist = clipboardWhitelist,
                 ClipboardBlacklist = clipboardBlacklist,
+                ScreenshotBlockPolicy = screenshotBlockPolicy,
                 RestoreDevices = restoreDevices,
                 ClipboardReevaluate = clipboardReevaluate,
             });
-        }))));
+        })))));
 
     // Reconcile delegates fire via Task.Run (fire-and-forget) - poll instead of assuming they
     // already ran by the time Handle() returns.
@@ -141,6 +145,19 @@ public class WindowsControlHandlerTests
             Assert.Empty(f.ClipboardWhitelist.GetAll());
             Assert.True(f.ClipboardBlacklist.IsEnabled);
             Assert.Empty(f.ClipboardBlacklist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void ResetAllPolicy_ScreenshotBlockPolicy_Disabled_SameAsScreenshotBlockDisableCmd()
+    {
+        WithFixture(f =>
+        {
+            f.ScreenshotBlockPolicy.SetEnabled(true);
+
+            CaptureStdout(() => f.Handler.Handle(new ResetAllPolicyCmd("1")));
+
+            Assert.False(f.ScreenshotBlockPolicy.IsEnabled);
         });
     }
 

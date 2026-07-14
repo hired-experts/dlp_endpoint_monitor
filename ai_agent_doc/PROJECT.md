@@ -158,15 +158,17 @@ every `*_set` command's `entries` array.
 persisted policy.
 
 `reset_all_policy` clears all four lists (device whitelist, device blacklist, clipboard
-whitelist, clipboard blacklist) in one call, handled by `WindowsControlHandler` (not by
-`WindowsUsbProtectionHandler`/`WindowsClipboardProtectionHandler`, since no single existing
-handler owns both device and clipboard state). Each list ends up in exactly the state its own
-individual `*_clear` command would leave it in - device whitelist also disables itself
-(matching `device_whitelist_clear`'s factory-reset semantics: an enabled-but-empty whitelist is
-deny-all), the other three only empty (already the loosest state for a blacklist, and for
-clipboard's independently-toggleable model). It is **additive, not a replacement** - every
-individual `*_clear` command keeps working unchanged on its own; this exists purely so a caller
-that wants everything cleared doesn't need four separate round trips. See
+whitelist, clipboard blacklist) AND disables screenshot-block, in one call, handled by
+`WindowsControlHandler` (not by `WindowsUsbProtectionHandler`/`WindowsClipboardProtectionHandler`,
+since no single existing handler owns both device and clipboard state). Each list ends up in
+exactly the state its own individual `*_clear` command would leave it in - device whitelist also
+disables itself (matching `device_whitelist_clear`'s factory-reset semantics: an enabled-but-empty
+whitelist is deny-all), the other three only empty (already the loosest state for a blacklist, and
+for clipboard's independently-toggleable model) - and screenshot-block is turned off
+(`ScreenshotBlockPolicy.SetEnabled(false)`, see section 5.11). It is **additive, not a
+replacement** - every individual `*_clear`/`screenshot_block_disable` command keeps working
+unchanged on its own; this exists purely so a caller that wants everything cleared doesn't need
+five separate round trips. See
 `WindowsControlHandler.Handle(ResetAllPolicyCmd)` for the reconcile delegates it fires
 (`restoreDevices` covering all four device monitors, plus clipboard's own `reevaluate`). A
 standing rule (AGENTS.md "Policy list completeness") requires every future policy list to be
@@ -193,7 +195,7 @@ Every event has a `type` field (the JSON discriminant). Table: `type` value, C# 
 | `usb_device_blocked` / `usb_device_block_failed` | `UsbDeviceBlockedEvent` / `BlockFailedEvent` | `..., instanceId, reason` ("blacklist_match"/"whitelist_gate"), `sourceEventId?, error?(failed only), ts` | After a block attempt. `reason` says which policy caused it (re-derived from the live composite-group check when one applies, section 10); `error` (failed only) says why the action itself failed - the two are orthogonal |
 | `usb_device_unblocked` / `usb_device_unblock_failed` | `UsbDeviceUnblockedEvent` / `UnblockFailedEvent` | `vid?, pid?, serial?, kind, instanceId, sourceEventId?, error?(failed only), ts` | During `RestoreCompliant` |
 | `usb_storage_status` | `UsbStorageStatusEvent` | `id?, ok, enabled` | Reply to `usb_storage_status` |
-| `usb_storage_kill_switch_blocked` | `UsbStorageKillSwitchBlockedEvent` | `vid?, pid?, serial?, instanceId, ts` | A confirmed mass-storage-class device (Compatible IDs contain `Class_08`) connects while `usb_disable_storage` is active - purely observational, no block action of its own to report success/failure on (section 5.7) |
+| `usb_storage_blocked` | `UsbStorageBlockedEvent` | `vid?, pid?, serial?, instanceId, ts` | A confirmed mass-storage-class device (Compatible IDs contain `Class_08`) connects while `usb_disable_storage` is active - purely observational, no block action of its own to report success/failure on (section 5.7) |
 | `device_protection_status` | `DeviceProtectionStatusEvent` | `id?, ok, mode, error?` | Reply to `device_protection_status`, also usable standalone |
 | `device_whitelist_get` / `device_blacklist_get` | `DeviceWhitelistGetEvent` / `DeviceBlacklistGetEvent` | `id?, ok, enabled, entries: WhitelistEntryDto[]` | Reply to the `_get` commands |
 | `monitor_connected` / `monitor_disconnected` | `MonitorConnectedEvent` / `DisconnectedEvent` | `vid?, pid?, devicePath, ts` | External monitor interface arrival/removal (`vid`/`pid` = EDID manufacturer/product code) |
@@ -716,7 +718,7 @@ Independent of the per-device whitelist/blacklist mechanism entirely:
 `usb_disable_storage`/`usb_enable_storage`/`usb_storage_status` commands, not by the
 protection-status commands.
 
-**`usb_storage_kill_switch_blocked` gives this switch visibility when it's actually doing
+**`usb_storage_blocked` gives this switch visibility when it's actually doing
 something.** Flipping `USBSTOR!Start` to `4` stops Windows from ever binding a storage driver
 to a newly-arriving mass-storage device, but until this event existed that was invisible -
 `UsbMonitor.HandleArrival` still fires the normal `usb_device_connected` for the interface
@@ -726,15 +728,18 @@ the devnode's Compatible IDs (`CM_DRP_COMPATIBLEIDS`) directly and delegates to 
 `CompatibleIdsIndicateMassStorage` (a case-insensitive substring check for `"Class_08"`, the
 USB mass-storage class code) to confirm the device really is mass-storage-class, independent
 of whatever `Kind` it resolved to. `UsbMonitor.HandleArrival` emits
-`UsbStorageKillSwitchBlockedEvent` right after the normal `usb_device_connected` event whenever
+`UsbStorageBlockedEvent` right after the normal `usb_device_connected` event whenever
 `!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId)` is
 true - purely observational, it never gates or changes `allowed`/`reason` and fires regardless
 of whitelist/blacklist state, because Windows itself already refused to load USBSTOR before
 this process had any say in the matter: there is no block action here for this process to
-attempt, succeed, or fail at, so there is no `usb_storage_kill_switch_block_failed`
+attempt, succeed, or fail at, so there is no `usb_storage_block_failed`
 counterpart, the same reasoning as `ScreenshotBlockedEvent` having no failure counterpart
 (section 5.11) - swallowing a keystroke and observing an already-Windows-refused driver bind
-both have no failure mode of their own to report.
+both have no failure mode of their own to report. (Named `usb_storage_blocked`, not
+`usb_storage_kill_switch_blocked` - the `usb_storage_*` prefix already disambiguates it from
+the per-device `usb_device_blocked`/`usb_device_block_failed` pair, so spelling out "kill
+switch" in the middle was redundant.)
 
 Such a device is usually `Kind=Unknown` in the `usb_device_connected` event reported moments
 earlier for the same arrival - not `Kind=Storage` - because the storage-specific interface
@@ -934,16 +939,20 @@ the whitelist/blacklist-entry shape. `screenshot_block_enable`/`screenshot_block
 `screenshot_block_status` (`Handlers/Windows/WindowsScreenshotProtectionHandler.cs`) mirror
 that command trio exactly.
 
-**Deliberately NOT wired into `reset_all_policy`.** AGENTS.md's "Policy list completeness"
-rule only applies to `UsbDeviceList`/`ClipboardRuleList` subclasses - `ResetAllPolicyCmd_
-HandlerConstructorCoversEveryPolicyListType` (`WindowsControlHandlerTests.cs`) reflects over
-exactly those two base types, and `ScreenshotBlockPolicy` is neither. `reset_all_policy`'s
-documented scope (section 2.1) is "clear all four whitelist/blacklist-style lists" - a bare
-enable/disable switch with no entries to clear is a different shape entirely (there is
-nothing for a "clear" semantic to mean here), so it is intentionally left out rather than
-silently included under a rule that does not describe it. If this policy ever grows entries
-of its own, it would need its own explicit decision about `reset_all_policy`, not an
-automatic one inherited from this rule.
+**Wired into `reset_all_policy` as a fifth, explicitly-added domain, not via the
+`UsbDeviceList`/`ClipboardRuleList` reflection rule.** AGENTS.md's "Policy list completeness"
+rule (and the `ResetAllPolicyCmd_HandlerConstructorCoversEveryPolicyListType` test in
+`WindowsControlHandlerTests.cs`) only reflects over `UsbDeviceList`/`ClipboardRuleList`
+subclasses, and `ScreenshotBlockPolicy` is neither - a bare enable/disable switch with no
+entries has no "clear" semantic for that rule to describe. `reset_all_policy` covering
+screenshot-block-off is therefore a deliberate, hand-wired addition
+(`UNINSTALL-POLICY-CLEANUP-FIX-PLAN.md`), not something the reflection test enforces:
+`WindowsControlHandler`'s constructor takes the same `ScreenshotBlockPolicy` instance wired
+into `WindowsScreenshotProtectionHandler`, and `Handle(ResetAllPolicyCmd)` calls
+`_screenshotBlockPolicy.SetEnabled(false)` alongside the four list clears - "reset everything"
+is meant to include every policy domain an uninstall needs to leave in its loosest state, not
+just the two list base types the reflection test happens to cover. If this policy ever grows
+entries of its own, the "clear" side of that would still need its own explicit decision here.
 
 **Shortcuts covered, and why PrintScreen needs a dual keydown/keyup check.**
 `KeyboardHook.HandleScreenshotShortcut` detects four OS-native shortcuts: PrintScreen alone,
@@ -1363,6 +1372,74 @@ lines look the way they do, so a future change does not accidentally reintroduce
   before `MessageWindow.RunMessageLoop()`), fully decoupling it from both the entry thread's
   sequential setup and the message-pump startup itself. See AGENTS.md section 10 for the "lesson
   for any future companion-side relay client" this leaves behind.
+- **[fixed] The primary resolved the active Windows console session exactly once at startup and
+  never revisited it, so a live user switch (Fast User Switching) or a logout+different-user-login
+  left the clipboard/keyboard companion and the Bluetooth/Display relay clients bound to the
+  ORIGINAL session forever - only a full service restart recovered.** The concrete symptom: a
+  Bluetooth-backed mouse or keyboard reconnecting with a new device-tree instance during the
+  transition was never re-evaluated against whitelist/blacklist, so a device that should have been
+  blocked (or newly needed blocking) kept working right through the switch, silently outside
+  policy, with no error to explain why - the companion and relay clients were still alive, just
+  pointed at a session nobody was using anymore. Fixed by registering the hidden `MessageWindow`
+  for `WM_WTSSESSION_CHANGE` (`NativeMethods.WTSRegisterSessionNotification`/
+  `WTSUnRegisterSessionNotification`, new P/Invokes, `NOTIFY_FOR_ALL_SESSIONS` since this process's
+  own session never changes in the real deployment but some OTHER session's logon/logoff/connect/
+  disconnect does), a new `SessionChanged` event on `MessageWindow` (`WndProc`'s
+  `WM_WTSSESSION_CHANGE` case deliberately ignores wParam/lParam - any notification just means "go
+  re-derive the active console session," not a specific transition worth switching on), and
+  `Program.cs`'s `EnsureCompanionForActiveSession()` - the former one-shot startup companion-decision
+  block, now a re-runnable function. It is dispatched off the message-pump thread via `Task.Run`
+  from `OnSessionChanged` (never called directly from `WndProc`, since it makes blocking Win32 calls
+  and ~2s relay-client connects) behind an 800ms debounce using the same cancel-then-dispose-before-
+  installing-the-new-token discipline as `DisplayMonitor.OnDisplayChanged` (Windows can deliver
+  several `WM_WTSSESSION_CHANGE` notifications for one logical transition - lock, disconnect, and
+  connect can each fire their own). `companionTargetSession`/`companionEverResolved` let the
+  function distinguish a genuine session change from a redundant re-notification, and - on a real
+  change - terminate the OLD session's companion (`SessionActions.TerminateCompanionProcesses`)
+  before launching a fresh one into the new session through the same `LaunchIntoSession` path used
+  at startup. Because `BluetoothMonitor`/`DisplayMonitor` capture their enumerate/display-control
+  delegates BY VALUE at construction time, reassigning those `Func<>` instances on a later session
+  change would silently never take effect - the monitor already holds the old closure. The fix adds
+  a layer of indirection instead: mutable `currentDisplayRelayClient`/`currentBluetoothRelayClient`
+  variables that the already-constructed `Func<>` delegates (`disableExternalDisplays`/
+  `enableExternalDisplays`/`enumerateBluetoothDevices`) read FRESH on every call, so swapping the
+  variable changes behavior without the monitors ever needing new delegates - the same
+  by-value-capture reasoning is why `stopCompanion` is a stable wrapper around a mutable
+  `currentStopCompanion` field rather than a directly-reassigned variable (`WindowsControlHandler`
+  holds whatever delegate instance it's given in a `readonly` field, so a later reassignment of a
+  plain variable would leave it calling a stale closure forever). After a successful relaunch,
+  `EnsureCompanionForActiveSession` also forces `Task.Run(bluetoothMonitor.EnumerateExisting)`/
+  `Task.Run(displayMonitor.BlockNonCompliant)` - this fresh compliance sweep, not just the
+  relay-plumbing swap, is what actually fixes stale enforcement after a switch. **Deliberately
+  scoped to only the realistic production transition** (an already-companioned session A -> session
+  B): it does NOT rebuild the primary's own local `clipboardMonitor`/`keyboardHook` live - that would
+  require reconstructing objects live on the message-pump thread and is explicitly out of scope
+  here.
+- **[fixed - real production bug, confirmed reproducible on a fresh MSI-installed deployment] The
+  gap the fix above knowingly left open turned out to be reachable, not just theoretical: `msgThread`
+  read `runClipboardLocally` exactly once, at its own construction, so a primary that started before
+  any interactive session existed (cold boot, or the sibling dlp_v2 Node.js agent respawning this
+  binary after its own self-update - dlp_v2 has no session-awareness of its own and no coordination
+  with this process's own session detection, it just launches a fresh copy and hopes the timing works
+  out) permanently committed to building local, Session-0-bound `ClipboardMonitor`/`KeyboardHook`
+  instances - even after `EnsureCompanionForActiveSession` later launched a companion into a real
+  session moments afterward.** Windows lets multiple processes each register `WM_CLIPBOARDUPDATE`/
+  `WH_KEYBOARD_LL` (registration is not exclusive), so nothing ever errored - the already-built local
+  hooks just sat on the inert Session-0 desktop forever, silently breaking clipboard AND
+  screenshot-shortcut policy enforcement (both live in the same `KeyboardHook`/`ClipboardMonitor`
+  pair) until a full service restart forced the startup check to run again from scratch. Fixed by
+  promoting the local `KeyboardHook` variable (`localKeyboardHook`) to the same outer scope
+  `clipboardMonitor` already used, and having `EnsureCompanionForActiveSession`'s successful-launch
+  branch (`if (ok)`) dispose both the moment a companion actually takes over -
+  `KeyboardHook.Dispose` (`UnhookWindowsHookEx`, Win32-documented as callable from any thread, not
+  just the installing one) and `ClipboardMonitor.Dispose` (a plain `MessageWindow.ClipboardChanged`
+  unsubscribe) are both simple, thread-safe operations, so no message-pump-thread reconstruction -
+  the exact reason the prior fix gave for leaving this out of scope - was actually needed to close
+  it. `ReevaluateClipboard` was made null-tolerant (`clipboardMonitor?.ApplyPolicy()`) since
+  `clipboardMonitor` can now legitimately go from non-null back to null mid-run (it previously could
+  only ever be null for the entire process lifetime, never transition), and final shutdown disposal
+  of both variables now covers all three possible histories: never-local, local-then-torn-down-by-a-
+  companion-takeover, and local-for-the-whole-run.
 
 ### Not implemented - worth flagging before relying on it
 
@@ -1468,13 +1545,39 @@ delivery). `App.OnStartup` (`AlertHost/App.xaml.cs`) creates the mutex with
 
 - If `createdNew` is true, this instance **is** the owner: it starts an `AlertQueue`
   (section 11.3) and a `PipeTransport.Server` (`AlertHost/PipeTransport.cs`) listening on a
-  named pipe, `NamedPipeServerStream`, whose name is `AlertPipe.Name` - a single constant
-  defined once in `DlpEndpointMonitor.AlertContracts/AlertPipe.cs` and referenced by both sides,
-  never hand-typed as a literal in more than one place.
+  named pipe, `NamedPipeServerStream`, whose name is `AlertPipe.NameFor(sessionId)` - a single
+  function defined once in `DlpEndpointMonitor.AlertContracts/AlertPipe.cs` and referenced by
+  both sides, never hand-typed as a literal in more than one place.
 - If `createdNew` is false, an owner already exists: this instance is a **one-shot client** -
-  it opens a `NamedPipeClientStream` to `AlertPipe.Name`, writes exactly one newline-terminated
-  JSON `AlertRequest` line (mirroring the newline-delimited-JSON convention this repo already
-  uses between the main binary and its stdin/stdout), and exits immediately via `Shutdown(0)`.
+  it opens a `NamedPipeClientStream` to that same session's `AlertPipe.NameFor(sessionId)`,
+  writes exactly one newline-terminated JSON `AlertRequest` line (mirroring the
+  newline-delimited-JSON convention this repo already uses between the main binary and its
+  stdin/stdout), and exits immediately via `Shutdown(0)`.
+
+**[fixed] The pipe name must be scoped per session id - it was originally one fixed string,
+`AlertPipe.Name`, and that was a real bug, not just a style choice.** The `"Global\"`-prefix
+convention that correctly scopes the singleton `Mutex` above to one owner per session does NOT
+have an equivalent for named pipes: unlike kernel objects that respect that prefix, a named pipe
+(`\\.\pipe\<name>`, backed by `\Device\NamedPipe\`) lives in **one machine-wide kernel
+namespace** regardless of which session creates or opens it - there is no unprefixed-vs-`Global\`
+distinction to get right or wrong, because session isolation for pipes simply does not exist at
+that layer. With a single fixed pipe name, a stale `AlertHost.exe` left running in a
+**disconnected** session - the common case after Fast User Switching, which does not tear down
+the previous session's processes - could still hold the one machine-wide pipe open and answer a
+`TrySendToRunningOwner`/`TrySendToOwner` connect attempt meant for whichever session is actually
+active *now*. The connecting side has no way to tell it reached the wrong session's owner: the
+connect succeeds, the write succeeds, `ShowAlert` returns `(true, null)` - and the alert is
+enqueued into a window queue nobody can ever see, since that owner's session has no attached
+console. Fixed by making the pipe name a function of session id, `AlertPipe.NameFor(uint
+sessionId)`, threaded through every caller that used to reference the bare constant:
+`PipeTransport.Server`/`PipeTransport.TrySendToOwner` (`AlertHost/PipeTransport.cs`) derive their
+own session id via `Process.GetCurrentProcess().SessionId` in `App.xaml.cs` and open/listen on
+`NameFor` of that; `AlertActions.ShowAlert` (`DlpEndpointMonitor/Actions/AlertActions.cs`) now
+resolves the **target** session - via `SessionActions.GetActiveConsoleSessionId()` - *before*
+attempting the pipe at all, since there is no longer a session-agnostic pipe name to try first
+and fall back from. Each session's `AlertHost` owner therefore has its own distinct pipe; a
+disconnected session's leftover instance simply cannot answer a request addressed to a different,
+currently-active session's name.
 
 The owner's `PipeTransport.Server` runs an accept loop that reads newline-delimited JSON lines
 from whichever client is currently connected and forwards each parsed `AlertRequest` into the
@@ -1598,7 +1701,7 @@ optional; both `AlertActions.ShowAlert` and `AlertHost.AlertQueue.Enqueue` rejec
 null/blank `Id` rather than showing an uncorrelatable alert, since a JSON-deserialized request
 can carry a blank string despite the compile-time non-nullable signature.
 `AlertType { Toast, FullScreen }`, `AlertSeverity { Info, Warning, Blocked }`,
-`AlertPipe.Name` (the one shared pipe-name constant, section 11.2).
+`AlertPipe.NameFor(sessionId)` (the one shared, session-scoped pipe-name function, section 11.2).
 
 ### 11.8 What is deliberately out of scope here
 

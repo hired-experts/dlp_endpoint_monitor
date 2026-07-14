@@ -21,10 +21,12 @@ static class AlertActions
     const string InitialAlertArgPrefix = "--initial-alert=";
 
     /// <summary>
-    /// Delivers <paramref name="request"/> to the current interactive session's AlertHost.
-    /// Tries the named pipe first (an owner may already be running there); if nobody answers,
-    /// launches a new AlertHost.exe with the request embedded as its first alert - directly if
-    /// this process already lives in the target session, or via WTSQueryUserToken +
+    /// Delivers <paramref name="request"/> to the current interactive session's AlertHost. The
+    /// target session is resolved FIRST, before any pipe attempt, because the pipe is
+    /// session-scoped (see AlertPipe's doc comment) - there is no session-agnostic pipe to try.
+    /// Tries that session's named pipe first (an owner may already be running there); if nobody
+    /// answers, launches a new AlertHost.exe with the request embedded as its first alert -
+    /// directly if this process already lives in the target session, or via WTSQueryUserToken +
     /// CreateProcessAsUser if it is elevated in a different one (the real LocalSystem/Session-0
     /// deployment).
     /// </summary>
@@ -36,7 +38,11 @@ static class AlertActions
         if (string.IsNullOrWhiteSpace(request.Id))
             return (false, "AlertRequest.Id is required and cannot be blank");
 
-        if (TrySendToRunningOwner(request))
+        uint? activeSession = SessionActions.GetActiveConsoleSessionId();
+        if (activeSession is not uint targetSession)
+            return (false, "WTSGetActiveConsoleSessionId: no interactive session attached to the console");
+
+        if (TrySendToRunningOwner(request, targetSession))
             return (true, null);
 
         string exePath = Path.Combine(AppContext.BaseDirectory, AlertHostExeName);
@@ -45,10 +51,6 @@ static class AlertActions
 
         string json = JsonSerializer.Serialize(request, AlertJsonContext.Default.AlertRequest);
         string args = InitialAlertArgPrefix + Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
-
-        uint? activeSession = SessionActions.GetActiveConsoleSessionId();
-        if (activeSession is not uint targetSession)
-            return (false, "WTSGetActiveConsoleSessionId: no interactive session attached to the console");
 
         // Same-session fast path — the normal case when running interactively (e.g. manual
         // testing); no token duplication needed since we are already IN the target session.
@@ -62,11 +64,11 @@ static class AlertActions
     // be shared directly: AlertContracts (the one project both sides may reference) is
     // deliberately kept dependency-free plain records/enums, and this binary must not take a
     // project reference on AlertHost (a WPF app) just to reuse a few lines of pipe-client code.
-    static bool TrySendToRunningOwner(AlertRequest request)
+    static bool TrySendToRunningOwner(AlertRequest request, uint sessionId)
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", AlertPipe.Name, PipeDirection.Out);
+            using var client = new NamedPipeClientStream(".", AlertPipe.NameFor(sessionId), PipeDirection.Out);
             client.Connect(PipeConnectTimeoutMs);
             using var writer = new StreamWriter(client) { AutoFlush = true };
             writer.WriteLine(JsonSerializer.Serialize(request, AlertJsonContext.Default.AlertRequest));

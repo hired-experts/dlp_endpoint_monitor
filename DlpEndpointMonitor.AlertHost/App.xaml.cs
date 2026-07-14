@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -36,6 +37,13 @@ public partial class App : Application
 
         AlertRequest? initialAlert = ParseInitialAlertArg(e.Args);
 
+        // This process's own SessionId always matches whatever session the launcher
+        // (AlertActions.ShowAlert) targeted - either launched directly by a process already in
+        // that session, or launched into it via CreateProcessAsUser - so it doubles as the pipe
+        // scope with no extra Win32 call needed (see AlertPipe's doc comment for why the pipe
+        // must be session-scoped at all).
+        uint sessionId = (uint)Process.GetCurrentProcess().SessionId;
+
         _singletonMutex = new Mutex(initiallyOwned: true, SingletonMutexName, out bool createdNew);
         if (!createdNew)
         {
@@ -43,7 +51,7 @@ public partial class App : Application
             // (if any) over the pipe and exit immediately rather than starting a second
             // pipe server for the same session.
             if (initialAlert is not null)
-                PipeTransport.TrySendToOwner(initialAlert);
+                PipeTransport.TrySendToOwner(initialAlert, sessionId);
             Shutdown(0);
             return;
         }
@@ -52,7 +60,7 @@ public partial class App : Application
         if (initialAlert is not null)
             _queue.Enqueue(initialAlert);
 
-        _pipeServer = new PipeTransport.Server(_queue.Enqueue);
+        _pipeServer = new PipeTransport.Server(_queue.Enqueue, sessionId);
     }
 
     protected override void OnExit(ExitEventArgs e)

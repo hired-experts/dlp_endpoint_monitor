@@ -1,3 +1,4 @@
+using System.IO;
 using DlpEndpointMonitor.AlertContracts;
 
 namespace DlpEndpointMonitor.AlertHost;
@@ -16,6 +17,15 @@ namespace DlpEndpointMonitor.AlertHost;
 public sealed class AlertQueue : IDisposable
 {
     const int MaxPending = 5;
+    const string FaultLogFileName = "alerthost-fault.log";
+
+    // Same %ProgramData%\DlpEndpointMonitor location the main binary's Core/StorageLocation.cs
+    // computes for its own policy files - mirrored here (not shared) because this project
+    // deliberately takes no ProjectReference on that one: a WPF app referencing only
+    // AlertContracts, same dependency-free reasoning as everywhere else in this capability.
+    public static readonly string FaultLogDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "DlpEndpointMonitor");
 
     readonly Action<AlertRequest> _show;
     readonly object _lock = new();
@@ -35,6 +45,41 @@ public sealed class AlertQueue : IDisposable
     {
         _show = show;
         _dispatchLoop = Task.Run(() => DispatchLoopAsync(_cts.Token));
+
+        // Makes a dead dispatch loop observable instead of silently vanishing. Root cause is not
+        // yet proven (see ALERTHOST-STALE-PROCESS-FIX-PLAN.md SS3/SS6 - most likely candidate is
+        // _signal.WaitAsync throwing something other than OperationCanceledException, outside the
+        // loop's own inner try/catch which only wraps the per-alert _show call) - deliberately NOT
+        // a self-restart here, only logging: self-healing is called out there as a separate, later
+        // design decision once the actual trigger is known. Without this, .NET's default
+        // unobserved-task-exception behavior just discards the fault silently, and a
+        // CreateProcessAsUser-launched GUI process has no console for Console.Error to reach
+        // either - a dedicated log file is the only place this would ever be visible at all.
+        _dispatchLoop.ContinueWith(
+            t => LogDispatchLoopFault(t.Exception!),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
+    }
+
+    // Pure formatting, isolated from the actual file write so it's testable without touching the
+    // real %ProgramData% location.
+    public static string FormatFaultLogLine(Exception fault) =>
+        $"{DateTimeOffset.UtcNow:O} AlertQueue dispatch loop faulted: {fault}{Environment.NewLine}";
+
+    // Never throws - this runs as a bare OnlyOnFaulted continuation with nothing above it to
+    // catch a second failure, and a failed log write must not compound the original fault.
+    static void LogDispatchLoopFault(Exception fault)
+    {
+        try
+        {
+            Directory.CreateDirectory(FaultLogDirectory);
+            File.AppendAllText(Path.Combine(FaultLogDirectory, FaultLogFileName), FormatFaultLogLine(fault));
+        }
+        catch
+        {
+            // Best-effort - nowhere left to report a failure here.
+        }
     }
 
     public void Enqueue(AlertRequest request)

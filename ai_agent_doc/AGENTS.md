@@ -131,8 +131,9 @@ DlpEndpointMonitor/
                               ClipboardActions.TryReadText()'s hardcoded "copy" - see section 10
     ScreenshotBlockPolicy.cs  single-boolean persisted policy (enable/disable only, no entries)
                               for the OS-native screenshot-shortcut block; KeyboardHook reads
-                              IsEnabled, deliberately not wired into reset_all_policy - see
-                              PROJECT.md section 5.11
+                              IsEnabled, wired into reset_all_policy as a hand-added fifth
+                              domain (not via the UsbDeviceList/ClipboardRuleList reflection
+                              rule) - see PROJECT.md section 5.11
     MessageWindow.cs          hidden Win32 window + message pump (clipboard/device/display events)
     JsonDiscriminantAttribute.cs   maps an enum value to the JSON field it discriminates on
     EmitsEventAttribute.cs    documents which event a command replies with (used by SchemaExporter)
@@ -156,7 +157,7 @@ DlpEndpointMonitor/
   Actions/                    stateless Win32 P/Invoke helpers, no policy logic
     UsbActions.cs             SetupAPI enumeration, CM_Disable/Enable/Eject, USBSTOR registry toggle,
                               IsMassStorageDevice/CompatibleIdsIndicateMassStorage (Compatible-IDs-based
-                              mass-storage detection feeding usb_storage_kill_switch_blocked, section 10)
+                              mass-storage detection feeding usb_storage_blocked, section 10)
     BluetoothActions.cs       BluetoothFindFirst/NextDevice, RemoveDevice (pairing - the primary
                               block action), path/CoD parsing
     DisplayActions.cs         QueryDisplayConfig/SetDisplayConfig(Paths) topology juggling
@@ -1058,6 +1059,149 @@ what is and is not covered and why.
   machine still failed with the identical `0x1F` - a pre-existing, reproducible limitation of that
   machine's CCD/driver stack this fix does not (and cannot) resolve; it only ensures the event stream
   never lies about whether the block actually took effect.
+- **[fixed] `AlertHost`'s alert-delivery named pipe was one fixed string shared across every
+  session - since named pipes are NOT session-isolated the way `Mutex` names are, a stale
+  `AlertHost.exe` left running in a disconnected session could silently swallow alerts meant for
+  the currently-active session.** `AlertHost`'s singleton `Mutex`
+  (`"DlpEndpointMonitor.AlertHost.Singleton"`, section 11.2) is correctly scoped one-owner-per-session
+  by deliberately omitting the `"Global\"` prefix - but that prefix convention is a `Mutex`-specific
+  kernel-object rule, and it has no equivalent for named pipes: a pipe (`\\.\pipe\<name>`) lives in
+  one machine-wide kernel namespace regardless of which session created it, so there was never an
+  "unprefixed = per-session" option to get right for `AlertPipe.Name` the way there was for the
+  mutex - the original fixed-string pipe name was *always* reachable from every session. Fast User
+  Switching does not tear down the previous session's processes, so its `AlertHost.exe` (and the
+  `PipeTransport.Server` it owns) kept running and kept listening on that one shared pipe name.
+  `AlertActions.ShowAlert` in a LATER, currently-active session would connect to that name, write its
+  `AlertRequest`, get a successful write back, and report `(true, null)` - with the alert actually
+  enqueued into the disconnected session's dead window queue, never shown to anyone, and no error
+  surfaced anywhere. Fixed by making the pipe name a function of session id -
+  `AlertPipe.NameFor(uint sessionId)` (`AlertContracts/AlertPipe.cs`) - and threading a session id
+  through every caller that used to reference the bare constant: `PipeTransport.Server`/
+  `TrySendToOwner` (`AlertHost/PipeTransport.cs`) derive their own via
+  `Process.GetCurrentProcess().SessionId` (`AlertHost/App.xaml.cs`), and
+  `Actions/AlertActions.cs`'s `ShowAlert` now resolves the TARGET session
+  (`SessionActions.GetActiveConsoleSessionId()`) *before* attempting the pipe at all, rather than
+  after, since there is no longer a session-agnostic name to try first. Covered by
+  `DlpEndpointMonitor.AlertHost.Tests/AlertPipeTests.cs` (pure string-formatting logic only -
+  `NameFor`'s distinctness/determinism - the actual cross-session pipe behavior this fixes still
+  needs real multi-session Windows state and remains manual-only, same as every other Win32-adjacent
+  piece of this capability).
+- **The active console session was resolved exactly once at `Program.cs` startup and never
+  revisited - a live user switch (Fast User Switching) or a logout+different-user-login left the
+  companion and every relay client bound to the session that was active at process start, forever,
+  until a full service restart.** Concrete consequence: a Bluetooth mouse/keyboard reconnecting
+  with a new device-tree instance during the switch was never re-evaluated against policy, so
+  something that should have been blocked kept working right through the transition. Fixed by
+  registering `MessageWindow` for `WM_WTSSESSION_CHANGE`
+  (`NativeMethods.WTSRegisterSessionNotification`/`WTSUnRegisterSessionNotification`,
+  `NOTIFY_FOR_ALL_SESSIONS` - this process's own session never changes in the real deployment, but
+  some OTHER session's logon/logoff/connect/disconnect does) and a new `MessageWindow.SessionChanged`
+  event (wParam/lParam deliberately ignored - any notification just means "go re-derive the active
+  console session"). `Program.cs`'s former one-shot startup companion-decision block is now
+  `EnsureCompanionForActiveSession()`, a re-runnable function dispatched off the message-pump thread
+  via `Task.Run` from an 800ms-debounced `OnSessionChanged` (same cancel-then-dispose-before-
+  installing-the-new-token discipline as `DisplayMonitor.OnDisplayChanged`, since Windows can fire
+  several `WM_WTSSESSION_CHANGE` notifications for one logical transition) - never called directly
+  from `WndProc`, since it makes blocking Win32 calls and ~2s relay-client connects. On a genuine
+  session change (tracked via `companionTargetSession`/`companionEverResolved`, distinguishing a
+  real transition from a redundant re-notification) it terminates the OLD session's companion
+  (`SessionActions.TerminateCompanionProcesses`) before launching a fresh one into the new session,
+  same `LaunchIntoSession` path as startup. **The sharp edge**: `BluetoothMonitor`/`DisplayMonitor`
+  capture their enumerate/display-control `Func<>` delegates BY VALUE at construction time, so
+  reassigning those delegate variables later would silently never take effect (the monitor already
+  holds the old closure) - the fix instead routes through mutable
+  `currentDisplayRelayClient`/`currentBluetoothRelayClient` variables that the already-constructed
+  delegates read FRESH on every call, so swapping the variable changes behavior without the
+  monitors ever needing a new delegate instance (same reasoning behind `stopCompanion` being a
+  stable wrapper around a mutable `currentStopCompanion` field, since `WindowsControlHandler` holds
+  its delegate in a `readonly` field). Any future companion-relevant value a monitor needs live
+  must go through this same "mutable variable the delegate re-reads" indirection, not a reassigned
+  delegate. After a successful relaunch, `EnsureCompanionForActiveSession` also forces a fresh
+  `bluetoothMonitor.EnumerateExisting`/`displayMonitor.BlockNonCompliant` sweep - this, not just the
+  relay-plumbing swap, is what actually fixes stale enforcement after the switch. **Deliberately
+  scoped to only the already-companioned session A -> session B transition** - rebuilding the
+  primary's own local `clipboardMonitor`/`keyboardHook` live (a same-session startup that later
+  needs to become companioned, or vice versa) is explicitly out of scope, since that would require
+  reconstructing objects live on the message-pump thread.
+- **[fixed - confirmed reproducible on a fresh MSI-installed deployment, both via a plain machine
+  reboot and via the sibling dlp_v2 Node.js agent respawning this binary after its own self-update]
+  `msgThread` read `bool runClipboardLocally` exactly once, at its own construction - a primary that
+  started before any interactive session yet existed permanently committed to local, Session-0-bound
+  `ClipboardMonitor`/`KeyboardHook` hooks, even after a companion later launched successfully into a
+  real session.** dlp_v2 has no session-awareness of its own and no coordination with this process's
+  own session detection - it just spawns a fresh copy of this binary after its own self-update and
+  hopes the timing works out, so a cold-started primary racing ahead of session detection was a real,
+  recurring path into this bug, not just a boot-time curiosity. This was exactly the gap the
+  `WM_WTSSESSION_CHANGE`/`EnsureCompanionForActiveSession` fix above knowingly left open at the time
+  ("does not attempt to un-do local clipboardMonitor/keyboardHook hooks that are already running") -
+  accepted then as a theoretical edge case, confirmed here as a reproducible one. Once a companion
+  took over, the stale local hooks were never torn down (Windows lets multiple processes each
+  register `WM_CLIPBOARDUPDATE`/`WH_KEYBOARD_LL` - registration isn't exclusive, so nothing ever
+  errored), silently breaking clipboard AND screenshot-shortcut policy enforcement until a full
+  service restart forced the startup check to run again from scratch. Fixed by promoting the local
+  `KeyboardHook` (`localKeyboardHook`) to the same outer scope `clipboardMonitor` already had, and
+  disposing both the instant `EnsureCompanionForActiveSession`'s `if (ok)` branch confirms a
+  companion took over - `KeyboardHook.Dispose`/`ClipboardMonitor.Dispose` are both simple,
+  thread-safe, safe-from-any-thread operations, so no message-pump-thread reconstruction (the reason
+  the prior fix gave for leaving this out of scope) was actually needed. `ReevaluateClipboard` was
+  made null-tolerant (`clipboardMonitor?.ApplyPolicy()`) since `clipboardMonitor` can now
+  legitimately go from non-null back to null mid-run, and final shutdown disposal of both variables
+  now covers all three possible histories: never-local, local-then-torn-down, and local-for-the-
+  whole-run.
+- **[known limitation, not fixed] Only ONE session is ever protected at a time - the one attached
+  to the physical console.** `SessionActions.GetActiveConsoleSessionId` (`WTSGetActiveConsoleSessionId`)
+  by definition returns at most one session id, and `EnsureCompanionForActiveSession` companions
+  exactly that one. On a machine where a second user is connected concurrently via Remote Desktop (or
+  a third-party remote-access tool like AnyDesk that creates its own Windows session rather than
+  taking over the console session), that second user's clipboard/keyboard/screenshot/AlertHost
+  protection is simply absent - not degraded, not delayed, entirely unenforced - for as long as they
+  are not the active console session. This is an accepted, deliberate scope limitation for the
+  product's current target deployment (one physical user per machine, console session only), not a
+  bug to be fixed under the current scope - documented here so it is not mistaken for an oversight if
+  raised again. Extending protection to every concurrently active session (not just the console one)
+  would require enumerating all active sessions (`WTSEnumerateSessions`) and running the equivalent
+  of `EnsureCompanionForActiveSession`'s companion-launch logic per session instead of once for a
+  single "the" active session - a materially larger design than anything in this document, deferred
+  until the product actually needs to support shared/terminal-server-style machines.
+- **`--policy-only` is a third, throwaway startup mode alongside `--schema`/`--session-companion`,
+  launched by the Node agent's uninstall cleanup step (`cleanup-policies.ts`) instead of the real
+  primary.** The real primary's normal startup unconditionally calls
+  `EnsureCompanionForActiveSession`, which kills and replaces whatever companion the REAL,
+  still-running primary already has live in the interactive session - running that path from an
+  uninstall cleanup process would open a self-inflicted protection gap during every uninstall (see
+  `UNINSTALL-POLICY-CLEANUP-FIX-PLAN.md`). `--policy-only` does ZERO session/companion/monitor
+  work - no `EnsureCompanionForActiveSession`, no `UsbMonitor`/`BluetoothMonitor`/`DisplayMonitor`/
+  `NetworkMonitor` - it just wires a `CommandDispatcher` straight to the same default
+  `%ProgramData%` policy files the real primary uses (every monitor-reconciliation delegate passed
+  to its handlers is a no-op), so `reset_all_policy`/`usb_enable_storage`/`screenshot_block_disable`/
+  `shutdown` sent by the cleanup script mutate the real persisted state without disturbing anything
+  live. Checked in the same early argument block as `--schema`/`--session-companion`, before any of
+  the real primary's own state is constructed.
+- **`SessionActions.TerminateStaleAlertHost` closes the same class of gap
+  `TerminateCompanionProcesses` closes for the clipboard/keyboard companion, but for
+  `DlpEndpointMonitor.AlertHost.exe` - confirmed live to survive a primary restart, a session
+  change, and even two agent self-updates untouched, quietly wedging its dispatch loop for the rest
+  of that AlertHost's process lifetime (see `ALERTHOST-STALE-PROCESS-FIX-PLAN.md`).** It is a thin
+  wrapper, not a near-duplicate implementation: AlertHost's exe path is a fixed constant (it always
+  lives alongside the primary), unlike the companion's caller-supplied exe path, so it just resolves
+  that one constant path and delegates the actual kill loop to `TerminateCompanionProcesses`. Called
+  from three places in `Program.cs`: from `stopCompanion` on this primary's own shutdown (re-deriving
+  the CURRENT active console session fresh, since AlertHost - unlike the companion - is never closed
+  over a session captured at launch time), and from `EnsureCompanionForActiveSession` both for the
+  OLD session (on a genuine session change) and the NEW session (any stale leftover from a prior run,
+  before launching a fresh companion) - gated only on the session-change/stale-run condition itself,
+  not on the companion's own exe-path check, since AlertHost cleanup doesn't need it. Alongside this,
+  `AlertQueue`'s dispatch loop (`DlpEndpointMonitor.AlertHost/AlertQueue.cs`) now has an
+  `OnlyOnFaulted` continuation (`LogDispatchLoopFault`) that appends a timestamped exception dump to
+  `%ProgramData%\DlpEndpointMonitor\alerthost-fault.log` if the loop ever dies - a
+  `CreateProcessAsUser`-launched GUI process has no console for `Console.Error` to reach, and .NET's
+  default unobserved-task-exception behavior would otherwise discard the fault silently, leaving a
+  wedged-forever AlertHost with zero diagnostic trail. Deliberately logging-only, not a self-restart
+  - the actual root cause of the dispatch loop dying is not yet proven (most likely candidate is
+  `_signal.WaitAsync` throwing something other than `OperationCanceledException`, outside the loop's
+  own inner try/catch which only wraps the per-alert `_show` call), so self-healing is deferred as a
+  separate, later decision once the real trigger is known; this fix's job is only to make a dead
+  dispatch loop observable instead of silently vanishing.
 
 ---
 
@@ -1087,6 +1231,7 @@ what is and is not covered and why.
 | Every P/Invoke signature and struct | `Win32/NativeMethods.cs` |
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | How a UI alert reaches the interactive session, and why | `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/App.xaml.cs`, `ai_agent_doc/PROJECT.md` section 11 |
+| How the primary reacts to a live Windows session change (Fast User Switching, logout+different-user-login) | `Core/MessageWindow.cs` (`SessionChanged`, `WM_WTSSESSION_CHANGE`), `Program.cs` (`EnsureCompanionForActiveSession`, `OnSessionChanged`), section 10 |
 | How screenshot-shortcut blocking works and its scope limits | `Monitors/KeyboardHook.cs`, `ai_agent_doc/PROJECT.md` section 5.11 |
 | Deep design, protocol tables, principles, roadmap | `ai_agent_doc/PROJECT.md` |
 | The validation gate to run before a commit | AGENTS.md section 8.1 |

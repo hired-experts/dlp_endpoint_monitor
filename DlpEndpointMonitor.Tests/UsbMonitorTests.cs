@@ -1,3 +1,4 @@
+using DlpEndpointMonitor.Core;
 using DlpEndpointMonitor.Monitors;
 using Xunit;
 
@@ -140,5 +141,55 @@ public class UsbMonitorGroupAnchorTests
         Assert.Equal(2, anchors.Count);
         Assert.Equal("event-A", anchors["group-1"]);
         Assert.Equal("event-B", anchors["group-2"]);
+    }
+}
+
+// T-USBMON-09..11: UsbMonitor.FilterStorageKillSwitchRecords - the pure "which persisted
+// disabled-devices records belong to the usb_disable_storage kill switch's retroactive sweep"
+// decision behind RestoreStorageDisabled, factored out the same way ResolveGroupAnchorCore is -
+// no Win32, just a BlockedBy tag check over a plain list of records. The actual restore decision
+// (IsRecordCompliant - whether current whitelist/blacklist policy also wants a filtered-in record
+// to stay blocked) is not covered here: it depends on live device-tree state (UsbActions.GetGroupId/
+// EnumerateGroupSiblings), same hardware-only limitation as RestoreCompliant's own IsRecordCompliant
+// today - see TEST-PLAN.md section 1.
+public class UsbMonitorStorageKillSwitchFilterTests
+{
+    static DisabledDeviceRecord Record(string instanceId, string? blockedBy) =>
+        new(instanceId, "1234", "5678", "SERIAL1", DeviceKind.Storage, BlockedBy: blockedBy);
+
+    [Fact]
+    public void FilterStorageKillSwitchRecords_OnlyReturnsRecordsTaggedByTheKillSwitch()
+    {
+        var records = new[]
+        {
+            Record("USB\\A", blockedBy: null),                                          // normal policy-triggered disable
+            Record("USB\\B", blockedBy: UsbMonitor.StorageKillSwitchBlockedBy),          // kill-switch sweep
+            Record("USB\\C", blockedBy: "some_future_unrelated_tag"),                    // never a third value today, but must not match
+        };
+
+        var result = UsbMonitor.FilterStorageKillSwitchRecords(records).ToList();
+
+        Assert.Single(result);
+        Assert.Equal("USB\\B", result[0].InstanceId);
+    }
+
+    [Fact]
+    public void FilterStorageKillSwitchRecords_NoMatches_ReturnsEmpty()
+    {
+        var records = new[] { Record("USB\\A", blockedBy: null) };
+
+        Assert.Empty(UsbMonitor.FilterStorageKillSwitchRecords(records));
+    }
+
+    [Fact]
+    public void FilterStorageKillSwitchRecords_AllMatch_ReturnsAll()
+    {
+        var records = new[]
+        {
+            Record("USB\\A", blockedBy: UsbMonitor.StorageKillSwitchBlockedBy),
+            Record("USB\\B", blockedBy: UsbMonitor.StorageKillSwitchBlockedBy),
+        };
+
+        Assert.Equal(2, UsbMonitor.FilterStorageKillSwitchRecords(records).Count());
     }
 }

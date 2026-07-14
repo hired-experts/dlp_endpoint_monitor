@@ -23,15 +23,16 @@ static class PipeTransport
     const int ReadInactivityTimeoutMs = 5000;
 
     /// <summary>
-    /// Sends one AlertRequest to whichever AlertHost instance currently owns this session's
-    /// pipe. Returns false (never throws) if no owner is listening - the caller decides what
-    /// that means, it is not necessarily an error (e.g. no owner has started yet).
+    /// Sends one AlertRequest to whichever AlertHost instance currently owns
+    /// <paramref name="sessionId"/>'s pipe. Returns false (never throws) if no owner is
+    /// listening - the caller decides what that means, it is not necessarily an error (e.g. no
+    /// owner has started yet).
     /// </summary>
-    public static bool TrySendToOwner(AlertRequest request)
+    public static bool TrySendToOwner(AlertRequest request, uint sessionId)
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", AlertPipe.Name, PipeDirection.Out);
+            using var client = new NamedPipeClientStream(".", AlertPipe.NameFor(sessionId), PipeDirection.Out);
             client.Connect(ConnectTimeoutMs);
             using var writer = new StreamWriter(client) { AutoFlush = true };
             writer.WriteLine(JsonSerializer.Serialize(request, AlertJsonContext.Default.AlertRequest));
@@ -52,12 +53,14 @@ static class PipeTransport
     public sealed class Server : IDisposable
     {
         readonly Action<AlertRequest> _onReceived;
+        readonly string _pipeName;
         readonly CancellationTokenSource _cts = new();
         readonly Task _acceptLoop;
 
-        public Server(Action<AlertRequest> onReceived)
+        public Server(Action<AlertRequest> onReceived, uint sessionId)
         {
             _onReceived = onReceived;
+            _pipeName = AlertPipe.NameFor(sessionId);
             _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
         }
 
@@ -69,7 +72,7 @@ static class PipeTransport
                 try
                 {
                     pipe = new NamedPipeServerStream(
-                        AlertPipe.Name, PipeDirection.In, 1,
+                        _pipeName, PipeDirection.In, 1,
                         PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
                 }
                 catch (Exception ex)

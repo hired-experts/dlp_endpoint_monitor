@@ -157,4 +157,29 @@ public class AlertQueueTests
         Assert.Contains("missing required Id", logged, StringComparison.OrdinalIgnoreCase);
         lock (shown) Assert.Empty(shown);
     }
+
+    // T-AQ-04: covers the dispatch-loop-fault observability fix
+    // (ALERTHOST-STALE-PROCESS-FIX-PLAN.md section 4 step 4). Forcing the private _dispatchLoop
+    // Task itself to fault isn't something a unit test can cleanly do (its only failure surface is
+    // an unexpected exception from SemaphoreSlim.WaitAsync) - instead this isolates the one pure,
+    // directly-callable piece of the fix: the log-line formatting the OnlyOnFaulted continuation
+    // hands a real exception to. The file-write half (LogDispatchLoopFault) is intentionally left
+    // untested here since it touches the real %ProgramData%\DlpEndpointMonitor location.
+    [Fact]
+    public void FormatFaultLogLine_IncludesTimestampAndExceptionDetails()
+    {
+        var fault = new InvalidOperationException("boom");
+
+        string line = AlertQueue.FormatFaultLogLine(fault);
+
+        Assert.Contains("AlertQueue dispatch loop faulted", line);
+        Assert.Contains(nameof(InvalidOperationException), line);
+        Assert.Contains("boom", line);
+        Assert.EndsWith(Environment.NewLine, line);
+
+        // The leading timestamp must be genuinely parseable ("O" round-trip format), not just
+        // present-looking text - a log a human/tool can't parse the time out of is half as useful.
+        string timestampPart = line[..line.IndexOf(' ')];
+        Assert.True(DateTimeOffset.TryParse(timestampPart, out _));
+    }
 }

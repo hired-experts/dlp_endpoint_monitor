@@ -10,6 +10,7 @@ sealed class WindowsControlHandler : IControlHandler
     readonly DeviceBlacklist    _blacklist;
     readonly ClipboardWhitelist _clipboardWhitelist;
     readonly ClipboardBlacklist _clipboardBlacklist;
+    readonly ScreenshotBlockPolicy _screenshotBlockPolicy;
     readonly Action             _restoreDevices;
     readonly Action             _clipboardReevaluate;
 
@@ -19,19 +20,25 @@ sealed class WindowsControlHandler : IControlHandler
     // The four lists + two reconcile delegates are the exact same instances/delegates already
     // wired into WindowsUsbProtectionHandler/WindowsClipboardProtectionHandler in Program.cs -
     // ResetAllPolicyCmd reuses them rather than owning a second copy of any policy state.
+    // screenshotBlockPolicy: the same instance wired into WindowsScreenshotProtectionHandler -
+    // reset_all_policy means every policy domain, not just device/clipboard (see
+    // UNINSTALL-POLICY-CLEANUP-FIX-PLAN.md - screenshot-block-off is folded in here rather than
+    // added as a fourth explicit command from the Node side).
     public WindowsControlHandler(
         Action stopCompanion,
         DeviceWhitelist whitelist, DeviceBlacklist blacklist,
         ClipboardWhitelist clipboardWhitelist, ClipboardBlacklist clipboardBlacklist,
+        ScreenshotBlockPolicy screenshotBlockPolicy,
         Action restoreDevices, Action clipboardReevaluate)
     {
-        _stopCompanion       = stopCompanion;
-        _whitelist           = whitelist;
-        _blacklist           = blacklist;
-        _clipboardWhitelist  = clipboardWhitelist;
-        _clipboardBlacklist  = clipboardBlacklist;
-        _restoreDevices      = restoreDevices;
-        _clipboardReevaluate = clipboardReevaluate;
+        _stopCompanion          = stopCompanion;
+        _whitelist              = whitelist;
+        _blacklist              = blacklist;
+        _clipboardWhitelist     = clipboardWhitelist;
+        _clipboardBlacklist     = clipboardBlacklist;
+        _screenshotBlockPolicy  = screenshotBlockPolicy;
+        _restoreDevices         = restoreDevices;
+        _clipboardReevaluate    = clipboardReevaluate;
     }
 
     public void Handle(PingCmd command) =>
@@ -50,6 +57,9 @@ sealed class WindowsControlHandler : IControlHandler
     // empty (already the loosest state for a blacklist / for clipboard's non-conflicting model),
     // matching DeviceBlacklistClearCmd/ClipboardWhitelistClearCmd/ClipboardBlacklistClearCmd
     // exactly. This command does not replace those - each keeps working unchanged on its own.
+    // Screenshot-block is a bare enable/disable with no entries (ScreenshotBlockDisableCmd's own
+    // semantics), so "reset" for it is just SetEnabled(false) - folded in here rather than a
+    // separate command, so reset_all_policy means every policy domain, full stop.
     public void Handle(ResetAllPolicyCmd command) => CommandReply.After(command.Id,
         () =>
         {
@@ -58,6 +68,7 @@ sealed class WindowsControlHandler : IControlHandler
             _blacklist.Clear();
             _clipboardWhitelist.Clear();
             _clipboardBlacklist.Clear();
+            _screenshotBlockPolicy.SetEnabled(false);
         },
         () => { _restoreDevices(); _clipboardReevaluate(); });
 }

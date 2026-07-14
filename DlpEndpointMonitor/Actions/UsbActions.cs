@@ -284,6 +284,20 @@ static class UsbActions
             : (false, $"CM_Enable_DevNode failed: 0x{cr:X}");
     }
 
+    // ── Volume interface identification ───────────────────────────────────────
+
+    // Same literal as Core/UsbKind.cs:19's GUID_DEVINTERFACE_VOLUME entry - a Volume path is a
+    // volume identity, not a PnP device-instance ID, so CM_Locate_DevNodeW can never resolve it.
+    const string VolumeInterfaceGuid = "{53F5630D-B6BF-11D0-94F2-00A0C91EFB8B}";
+
+    /// <summary>
+    /// True if this interface is GUID_DEVINTERFACE_VOLUME - a volume-namespace path, not an
+    /// independently-disableable devnode. The sibling disk-function interface (GUID_DEVINTERFACE_DISK/
+    /// CDROM/TAPE) is the real devnode and handles the actual block; see UsbMonitor.BlockDevice.
+    /// </summary>
+    public static bool IsVolumeInterface(string? classGuid) =>
+        string.Equals(classGuid, VolumeInterfaceGuid, StringComparison.OrdinalIgnoreCase);
+
     // ── Internal / strict-device protection ──────────────────────────────────
 
     // The machine's own essential devices on a laptop. A built-in one of these must never be
@@ -536,7 +550,7 @@ static class UsbActions
     /// </summary>
     public static bool IsProtectedInternal(DeviceKind kind, string instanceId)
     {
-        if (!StrictInputKinds.Contains(kind) && kind != DeviceKind.Unknown) return false;
+        if (!StrictInputKinds.Contains(kind) && kind != DeviceKind.Unknown && kind != DeviceKind.Storage) return false;
 
         return IsBuiltIn(instanceId);
     }

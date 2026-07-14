@@ -12,9 +12,16 @@ namespace DlpEndpointMonitor.Core;
 /// Bluetooth device has no USB vendor/product ID. <see cref="GroupId"/> is set only for a
 /// USB-blocked composite device (mirrors <see cref="Actions.ParsedDevice.GroupId"/>) so
 /// UsbMonitor's restore path can report which composite group an unblock corresponds to.
+/// <see cref="BlockedBy"/> is null for every normal policy-triggered disable (unchanged
+/// meaning, backward compatible with already-persisted JSON files predating this field) and
+/// set to <c>"usb_storage_disabled"</c> only for a record created by
+/// <see cref="Monitors.UsbMonitor.BlockAlreadyConnectedStorage"/> - the usb_disable_storage
+/// kill switch's retroactive sweep - so <see cref="Monitors.UsbMonitor.RestoreStorageDisabled"/>
+/// can find and restore exactly the devices IT disabled without touching an independent
+/// blacklist-disabled device.
 /// </summary>
 public sealed record DisabledDeviceRecord(
-    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind, string? Mac = null, string? GroupId = null);
+    string InstanceId, string Vid, string Pid, string? Serial, DeviceKind Kind, string? Mac = null, string? GroupId = null, string? BlockedBy = null);
 
 internal sealed class DisabledDevicesState
 {

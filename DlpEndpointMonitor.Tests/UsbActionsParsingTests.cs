@@ -186,4 +186,47 @@ public class UsbActionsParsingTests
 
         Assert.True(UsbActions.CompatibleIdsIndicateMassStorage(ids));
     }
+
+    // T-USB-15: GUID_DEVINTERFACE_VOLUME (Core/UsbKind.cs:19) is the one interface a Volume
+    // path exposes - CM_Locate_DevNodeW can never resolve it, so BlockDevice must be able to
+    // recognize and skip it (USB-STORAGE-SAFE-ENFORCEMENT-FIX-DESIGN.md section 3).
+    [Fact]
+    public void IsVolumeInterface_VolumeGuid_ReturnsTrue()
+    {
+        Assert.True(UsbActions.IsVolumeInterface("{53F5630D-B6BF-11D0-94F2-00A0C91EFB8B}"));
+    }
+
+    // T-USB-16: GUID_DEVINTERFACE_DISK is the sibling disk-function interface that IS a real,
+    // independently-disableable devnode - must not be mistaken for the Volume interface.
+    [Fact]
+    public void IsVolumeInterface_DiskGuid_ReturnsFalse()
+    {
+        Assert.False(UsbActions.IsVolumeInterface("{53F56307-B6BF-11D0-94F2-00A0C91EFB8B}"));
+    }
+
+    // T-USB-17: Fix 2 regression guard - DeviceKind.Storage must now route through the same
+    // IsBuiltIn bus-ancestry check StrictInputKinds/Unknown already do, instead of
+    // short-circuiting to false before ever consulting it. A nonexistent instance ID can never
+    // resolve via CM_Locate_DevNodeW on any machine, so IsBuiltIn's "no bus ancestor at all"
+    // branch deterministically returns true (fail-safe default) for ANY kind that reaches it -
+    // the same outcome a Keyboard-kind call already produces for a made-up ID. Equal outputs
+    // here prove Storage is no longer short-circuited to false ahead of that check.
+    [Fact]
+    public void IsProtectedInternal_StorageKind_ConsultsIsBuiltIn_NotShortCircuited()
+    {
+        const string nonexistentInstanceId = @"USB\VID_0000&PID_0000\NONEXISTENT-TEST-DEVICE";
+
+        Assert.Equal(
+            UsbActions.IsProtectedInternal(DeviceKind.Keyboard, nonexistentInstanceId),
+            UsbActions.IsProtectedInternal(DeviceKind.Storage, nonexistentInstanceId));
+    }
+
+    // T-USB-18: a kind outside StrictInputKinds/Unknown/Storage must still short-circuit to
+    // false without ever reaching IsBuiltIn - Camera/Video stay blockable regardless of bus
+    // ancestry (Core/UsbKind.cs's own StrictInputKinds doc comment).
+    [Fact]
+    public void IsProtectedInternal_CameraKind_StillShortCircuitsFalse()
+    {
+        Assert.False(UsbActions.IsProtectedInternal(DeviceKind.Camera, @"USB\VID_0000&PID_0000\NONEXISTENT-TEST-DEVICE"));
+    }
 }

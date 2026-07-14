@@ -265,10 +265,33 @@ public record UsbStorageStatusEvent(string? Id, bool Ok, bool Enabled) : IEvent
 // ScreenshotBlockedEvent's deliberate lack of a *_block_failed sibling. Fired by UsbMonitor as an
 // independent, additive check alongside (never instead of) the normal whitelist/blacklist arrival
 // evaluation - see UsbMonitor.HandleArrival and PROJECT.md section 5.7.
-[JsonDiscriminant(EventType.UsbStorageKillSwitchBlocked)]
-public record UsbStorageKillSwitchBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
+[JsonDiscriminant(EventType.UsbStorageBlocked)]
+public record UsbStorageBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, long Ts) : IEvent
 {
-    public EventType Type => EventType.UsbStorageKillSwitchBlocked;
+    public EventType Type => EventType.UsbStorageBlocked;
+    public string EventId { get; } = EventEmitter.NewEventId();
+}
+
+// A third, distinct trigger for a USB block/block-failed pair - deliberately NOT a reuse of
+// either existing type. Not UsbDeviceBlockedEvent/UsbDeviceBlockFailedEvent: those records'
+// Reason field is contractually exactly "blacklist_match" or "whitelist_gate" (see their own
+// doc comment above), never a third value - this fires from the usb_disable_storage kill
+// switch, not a whitelist/blacklist decision. Not UsbStorageBlockedEvent (just above): that
+// event is documented as purely OBSERVATIONAL with no possible failure (Windows itself refused
+// to bind a driver before this process had any say) - this trigger genuinely calls
+// CM_Disable_DevNode/eject against an already-mounted device and can genuinely fail, which
+// would contradict that event's own contract. See UsbMonitor.BlockAlreadyConnectedStorage.
+[JsonDiscriminant(EventType.UsbStorageDeviceBlocked)]
+public record UsbStorageDeviceBlockedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string? GroupId, string? SourceEventId, long Ts) : IEvent
+{
+    public EventType Type => EventType.UsbStorageDeviceBlocked;
+    public string EventId { get; } = EventEmitter.NewEventId();
+}
+
+[JsonDiscriminant(EventType.UsbStorageDeviceBlockFailed)]
+public record UsbStorageDeviceBlockFailedEvent(string? Vid, string? Pid, string? Serial, string InstanceId, string? GroupId, string? Error, string? SourceEventId, long Ts) : IEvent
+{
+    public EventType Type => EventType.UsbStorageDeviceBlockFailed;
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 

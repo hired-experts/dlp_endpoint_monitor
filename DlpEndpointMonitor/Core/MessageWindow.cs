@@ -15,6 +15,7 @@ sealed class MessageWindow : IDisposable
     public event Action?              ClipboardChanged;
     public event Action<int, IntPtr>? DeviceChanged;    // (wParam, lParam)
     public event Action?              DisplayChanged;
+    public event Action?              SessionChanged;
 
     public IntPtr Handle => _hWnd;
 
@@ -72,6 +73,13 @@ sealed class MessageWindow : IDisposable
         {
             Marshal.FreeHGlobal(pFilter);
         }
+
+        // Best-effort, same as RegisterDeviceNotification above (its return value isn't checked
+        // either) — a failure here just means the process never learns of a session change and
+        // falls back to whatever session it resolved at startup, not a fatal condition.
+        // NOTIFY_FOR_ALL_SESSIONS: we don't parse wParam/lParam at all (see WndProc below), we just
+        // re-derive the active console session ourselves on any notification.
+        NativeMethods.WTSRegisterSessionNotification(_hWnd, NativeMethods.NOTIFY_FOR_ALL_SESSIONS);
     }
 
     IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -90,10 +98,19 @@ sealed class MessageWindow : IDisposable
                 DisplayChanged?.Invoke();
                 return IntPtr.Zero;
 
+            // wParam/lParam carry the session id and the specific transition (logon/logoff/
+            // connect/disconnect/lock/unlock) — deliberately ignored. Any notification just means
+            // "go re-check which session is active now" (SessionActions.GetActiveConsoleSessionId),
+            // not something worth a per-transition switch here.
+            case NativeMethods.WM_WTSSESSION_CHANGE:
+                SessionChanged?.Invoke();
+                return IntPtr.Zero;
+
             case NativeMethods.WM_DESTROY:
                 NativeMethods.RemoveClipboardFormatListener(hWnd);
                 if (_hDevNotify != IntPtr.Zero)
                     NativeMethods.UnregisterDeviceNotification(_hDevNotify);
+                NativeMethods.WTSUnRegisterSessionNotification(hWnd);
                 NativeMethods.PostQuitMessage(0);
                 return IntPtr.Zero;
         }

@@ -92,6 +92,25 @@ static class SessionActions
     }
 
     /// <summary>
+    /// Kills any <c>DlpEndpointMonitor.AlertHost.exe</c> already running in
+    /// <paramref name="sessionId"/> - the same class of gap <see cref="TerminateCompanionProcesses"/>
+    /// closes for the companion, extended to the OTHER spawned child this binary never previously
+    /// reaped: confirmed live to survive a primary restart, a session change, and even two agent
+    /// self-updates untouched, quietly wedging its dispatch loop for the rest of that AlertHost's
+    /// process lifetime (see ALERTHOST-STALE-PROCESS-FIX-PLAN.md). A thin wrapper, not a
+    /// near-duplicate implementation: AlertHost's exe path is a fixed constant (it always lives
+    /// alongside the primary, same computation <c>AlertActions.ShowAlert</c> itself uses to launch
+    /// it), unlike the companion's caller-supplied <paramref name="exePath"/> above, so this just
+    /// resolves that one constant path and delegates the actual kill loop to
+    /// <see cref="TerminateCompanionProcesses"/> rather than re-implementing it.
+    /// </summary>
+    public static int TerminateStaleAlertHost(uint sessionId)
+    {
+        string exePath = Path.Combine(AppContext.BaseDirectory, "DlpEndpointMonitor.AlertHost.exe");
+        return TerminateCompanionProcesses(sessionId, exePath);
+    }
+
+    /// <summary>
     /// Launches <paramref name="exePath"/> into a session DIFFERENT from the one this process is
     /// running in - the real deployment shape, where the main binary runs as LocalSystem in
     /// Session 0 and must reach the logged-on user's desktop in another session. Every acquired

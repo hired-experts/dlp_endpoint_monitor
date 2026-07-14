@@ -48,7 +48,9 @@ public enum EventType
     [JsonStringEnumMemberName("monitor_projection_changed")]     MonitorProjectionChanged,
     [JsonStringEnumMemberName("screenshot_block_status")]        ScreenshotBlockStatus,
     [JsonStringEnumMemberName("screenshot_blocked")]              ScreenshotBlocked,
-    [JsonStringEnumMemberName("usb_storage_kill_switch_blocked")] UsbStorageKillSwitchBlocked,
+    [JsonStringEnumMemberName("usb_storage_blocked")]             UsbStorageBlocked,
+    [JsonStringEnumMemberName("usb_storage_device_blocked")]      UsbStorageDeviceBlocked,
+    [JsonStringEnumMemberName("usb_storage_device_block_failed")] UsbStorageDeviceBlockFailed,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
