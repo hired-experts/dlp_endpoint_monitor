@@ -13,10 +13,12 @@
         ShowInTaskbar="False"
         Topmost="True">
     <!--
-        Transient corner toast: anchored bottom-right (common OS toast convention) by
-        PositionBottomRight in code-behind once SizeToContent has measured the actual size.
-        Auto-closes after DurationSeconds, or on the X button in the header (ShowCloseButton, set
-        in code-behind) - NOT on a click anywhere on the toast, since that made it impossible to
+        Transient corner toast: anchored bottom-right (common OS toast convention) of its assigned
+        monitor's work area by PositionBottomRight in code-behind once SizeToContent has measured
+        the actual size - one instance is constructed per connected monitor, see
+        App.ShowAlertWindow. Auto-closes after DurationSeconds, on the X button in the header
+        (ShowCloseButton, set in code-behind), or when the matching instance on another monitor is
+        dismissed first - NOT on a click anywhere on the toast, since that made it impossible to
         select/copy the message or click the ID's Copy button without accidentally dismissing it.
         AlertBox is used directly (no extra wrapping Border) - it is already the complete rounded
         box, and a fixed 360px Width plus a second layer of margin/background was what made this

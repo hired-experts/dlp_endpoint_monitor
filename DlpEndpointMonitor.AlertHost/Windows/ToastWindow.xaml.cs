@@ -13,7 +13,7 @@ public partial class ToastWindow : Window
 {
     readonly DispatcherTimer _timer;
 
-    public ToastWindow(AlertRequest request)
+    public ToastWindow(AlertRequest request, Rect workArea)
     {
         InitializeComponent();
         Box.Severity = request.Severity;
@@ -23,7 +23,7 @@ public partial class ToastWindow : Window
         Box.ShowCloseButton = true;
         Box.CloseRequested += (_, _) => Close();
 
-        Loaded += (_, _) => PositionBottomRight();
+        Loaded += (_, _) => PositionBottomRight(workArea);
 
         _timer = new DispatcherTimer
         {
@@ -36,10 +36,9 @@ public partial class ToastWindow : Window
         Closed += (_, _) => _timer.Stop();
     }
 
-    void PositionBottomRight()
+    void PositionBottomRight(Rect workArea)
     {
         const double margin = 24;
-        Rect workArea = SystemParameters.WorkArea;
         Left = workArea.Right - ActualWidth - margin;
         Top = workArea.Bottom - ActualHeight - margin;
     }

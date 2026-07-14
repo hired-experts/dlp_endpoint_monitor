@@ -5,11 +5,13 @@ namespace DlpEndpointMonitor.AlertHost;
 
 /// <summary>
 /// The single in-memory queue owned by the pipe-owning AlertHost process. A dispatcher loop drains
-/// it one alert at a time - never two windows visible at once - applying two policies on the way
-/// in: COALESCE (a new request matching an already-queued/showing (Type, Severity) pair doesn't
-/// open a second window; it increments a running count folded into the next shown message's title)
-/// and CAP (at most <see cref="MaxPending"/> distinct pending entries are held; anything beyond
-/// that is dropped, and the drop is logged so it is never silent).
+/// it one alert at a time - never two alerts on screen at once, though one alert may occupy
+/// several windows simultaneously (one per connected monitor, see App.ShowAllAndWaitForDismiss) -
+/// applying two policies on the way in: COALESCE (a new request matching an already-queued/showing
+/// (Type, Severity) pair doesn't open another window; it increments a running count folded into
+/// the next shown message's title) and CAP (at most <see cref="MaxPending"/> distinct pending
+/// entries are held; anything beyond that is dropped, and the drop is logged so it is never
+/// silent).
 /// </summary>
 public sealed class AlertQueue : IDisposable
 {
@@ -143,9 +145,8 @@ public sealed class AlertQueue : IDisposable
 
             try
             {
-                // Expected to block until the alert window is dismissed (timer or click) so this
-                // loop naturally never shows two windows at once - added in a later iteration, a
-                // stub for now.
+                // Blocks until every per-monitor window for this alert is dismissed (timer,
+                // click, or close button) so this loop naturally never shows two alerts at once.
                 _show(toShow);
             }
             catch (Exception ex)

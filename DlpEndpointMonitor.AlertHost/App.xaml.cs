@@ -79,24 +79,109 @@ public partial class App : Application
 
     // AlertQueue's dispatch loop runs on its own background Task, not the WPF dispatcher
     // thread - every window must be built and shown from the UI thread, so this hops over via
-    // Dispatcher.Invoke (not InvokeAsync/BeginInvoke) specifically so the call blocks the
-    // dispatch loop's thread until ShowDialog() returns. That is what makes "never two windows
-    // visible at once" hold: the loop cannot dequeue the next pending alert until this one has
-    // actually been dismissed.
+    // Dispatcher.Invoke, blocking the dispatch loop's thread until every per-monitor window for
+    // this alert has been dismissed. That is what makes "only one alert shown at a time
+    // system-wide" hold - one alert can now occupy several windows at once (one per connected
+    // monitor), but the loop still cannot dequeue the next pending alert until all of them close.
     static void ShowAlertWindow(AlertRequest request)
     {
         Dispatcher dispatcher = Application.Current!.Dispatcher;
         dispatcher.Invoke(() =>
         {
-            Window window = request.Type switch
+            IReadOnlyList<MonitorHelper.MonitorInfo> monitors = MonitorHelper.GetAll();
+            var windows = new List<Window>(monitors.Count);
+            foreach (MonitorHelper.MonitorInfo monitor in monitors)
             {
-                AlertType.Toast => new ToastWindow(request),
-                // FullScreen, and any future/unmapped AlertType, fails safe to the hardest-to-miss
-                // window rather than silently not showing anything.
-                _ => new FullScreenWindow(request),
-            };
-            window.ShowDialog();
+                try
+                {
+                    Window window = request.Type switch
+                    {
+                        AlertType.Toast => new ToastWindow(request, monitor.WorkArea),
+                        // FullScreen, and any future/unmapped AlertType, fails safe to the
+                        // hardest-to-miss window rather than silently not showing anything.
+                        _ => new FullScreenWindow(request, monitor.Bounds),
+                    };
+                    windows.Add(window);
+                }
+                catch (Exception ex)
+                {
+                    // A single monitor's window failing to construct (e.g. it was unplugged
+                    // between MonitorHelper.GetAll() and here) must not prevent the alert from
+                    // showing on every OTHER still-good monitor.
+                    Console.Error.WriteLine($"[AlertHost] failed to construct alert window for a monitor: {ex.Message}");
+                }
+            }
+
+            if (windows.Count == 0)
+                return;
+
+            ShowAllAndWaitForDismiss(windows);
         });
+    }
+
+    // Shows every per-monitor window for one alert at once (Show(), not ShowDialog() - there is
+    // no single window left to be modal against) and blocks via a manually-pumped DispatcherFrame,
+    // the same mechanism ShowDialog uses internally, until every window has closed. Dismissing ANY
+    // one instance (click, close button, or its own timer) immediately closes every other instance
+    // too - they all represent one single alert, not independent ones, so acknowledging it on
+    // whichever monitor the user is looking at should acknowledge it everywhere.
+    static void ShowAllAndWaitForDismiss(List<Window> windows)
+    {
+        var frame = new DispatcherFrame();
+        var closed = new HashSet<Window>();
+        // Only windows that actually reached a successful Show() go in here - the dismiss-
+        // together cascade below must never reference (and never try to Close()) a sibling
+        // that failed to show at all, or the "everyone dismisses together" invariant can never
+        // be satisfied and a later Close() call could hit an unshown/half-constructed window.
+        var shown = new List<Window>(windows.Count);
+
+        try
+        {
+            foreach (Window window in windows)
+            {
+                window.Closed += (_, _) =>
+                {
+                    closed.Add(window);
+                    if (closed.Count == shown.Count)
+                    {
+                        frame.Continue = false;
+                        return;
+                    }
+
+                    foreach (Window other in shown)
+                    {
+                        if (!closed.Contains(other))
+                            other.Close(); // re-enters this same handler for `other`, synchronously
+                    }
+                };
+                window.Show();
+                shown.Add(window);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Show() failing partway through (e.g. a monitor dropped out from under us between
+            // construction and Show()) must not orphan whatever windows already made it on
+            // screen for this alert - close them now rather than leaving them live with no
+            // remaining path to the dismiss-together cascade, and never let the exception
+            // reach the message pump.
+            Console.Error.WriteLine($"[AlertHost] failed to show alert window on a monitor: {ex.Message}");
+            foreach (Window w in shown)
+            {
+                if (closed.Contains(w)) continue;
+                try { w.Close(); }
+                catch (Exception closeEx)
+                {
+                    Console.Error.WriteLine($"[AlertHost] failed to close orphaned alert window: {closeEx.Message}");
+                }
+            }
+            return;
+        }
+
+        if (shown.Count == 0)
+            return;
+
+        Dispatcher.PushFrame(frame);
     }
 
     static AlertRequest? ParseInitialAlertArg(string[] args)

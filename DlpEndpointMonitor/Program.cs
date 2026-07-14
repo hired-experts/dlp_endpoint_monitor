@@ -378,6 +378,7 @@ Func<IReadOnlyList<BluetoothActions.BtDevice>> enumerateBluetoothDevices = () =>
 // companion needs to be torn down before a fresh one is launched into the new session.
 uint? companionTargetSession = null;
 bool companionEverResolved   = false;
+bool companionLaunchOk       = true; // whether the LAST resolution for companionTargetSession actually succeeded
 
 // Re-derives "what session should own clipboard/keyboard/relay duties right now" and acts on any
 // change since the last call - called once below and again from OnSessionChanged whenever Windows
@@ -396,7 +397,7 @@ void EnsureCompanionForActiveSession()
 {
     var activeSession = SessionActions.GetActiveConsoleSessionId();
 
-    if (companionEverResolved && activeSession == companionTargetSession)
+    if (companionEverResolved && activeSession == companionTargetSession && companionLaunchOk)
         return; // nothing changed since the last resolution - cheap no-op for bursty notifications
 
     var previousTargetSession = companionTargetSession;
@@ -409,6 +410,7 @@ void EnsureCompanionForActiveSession()
         // startup message. An existing companion from a still-remembered previous session is not
         // proactively torn down here; it will be replaced the next time a real session resolves,
         // via the branch below (which always terminates whatever the PREVIOUS session was).
+        companionLaunchOk = true;
         EventEmitter.EmitInfo("no interactive session yet — clipboard/keyboard protection inactive until a user logs on");
         return;
     }
@@ -418,6 +420,7 @@ void EnsureCompanionForActiveSession()
         // Already inside the interactive session (manual/dev run — same fast path
         // AlertActions.ShowAlert uses). The local hooks reach a real desktop; no companion needed.
         // Per scope above, this never tears down/rebuilds those local hooks live.
+        companionLaunchOk = true;
         return;
     }
 
@@ -475,6 +478,8 @@ void EnsureCompanionForActiveSession()
 
     if (ok)
     {
+        companionLaunchOk = true;
+
         // Companion now owns clipboard/keyboard exclusively — do NOT also build inert local hooks
         // on this Session-0 desktop.
         runClipboardLocally = false;
@@ -534,6 +539,8 @@ void EnsureCompanionForActiveSession()
     }
     else
     {
+        companionLaunchOk = false;
+
         // Fail safe, not silent: keep whatever was running before this attempt (the (inert-but-
         // present) local hooks on a first-ever failure, or nothing new beyond what already existed
         // on a failed relaunch) so a failure never leaves us worse off than before, and surface the

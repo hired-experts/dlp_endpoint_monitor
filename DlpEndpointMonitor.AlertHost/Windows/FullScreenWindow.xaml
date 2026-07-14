@@ -10,13 +10,14 @@
         Topmost="True"
         MouseLeftButtonDown="OnClicked">
     <!--
-        Covers the entire screen edge-to-edge (explicit Left/Top/Width/Height from
-        SystemParameters.PrimaryScreen* in code-behind, not WindowState=Maximized, which on a
-        WindowStyle=None window sizes to the work area and leaves a taskbar-shaped gap) filled
-        solid with the severity color, with the same rounded AlertBox centered on top in white -
-        one continuous severity color from the screen edge through the header band, breaking to
-        white for the body. Auto-closes after DurationSeconds or on a click anywhere on the
-        backdrop.
+        Covers its assigned monitor edge-to-edge (explicit Left/Top/Width/Height from the
+        caller-supplied screen bounds in code-behind - one instance is constructed per connected
+        monitor, see App.ShowAlertWindow - not WindowState=Maximized, which on a WindowStyle=None
+        window sizes to the work area and leaves a taskbar-shaped gap) filled solid with the
+        severity color, with the same rounded AlertBox centered on top in white - one continuous
+        severity color from the screen edge through the header band, breaking to white for the
+        body. Auto-closes after DurationSeconds, on a click anywhere on the backdrop, or when the
+        matching instance on another monitor is dismissed first.
     -->
     <Grid x:Name="Backdrop">
         <controls:AlertBox x:Name="Box" Width="520" MaxWidth="720" HorizontalAlignment="Center" VerticalAlignment="Center"/>

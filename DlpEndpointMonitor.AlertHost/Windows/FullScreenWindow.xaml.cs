@@ -14,16 +14,16 @@ public partial class FullScreenWindow : Window
 {
     readonly DispatcherTimer _timer;
 
-    public FullScreenWindow(AlertRequest request)
+    public FullScreenWindow(AlertRequest request, Rect screenBounds)
     {
         InitializeComponent();
 
-        // Explicit primary-screen bounds, not WindowState=Maximized - see the XAML comment for
-        // why Maximized alone does not actually reach the screen edges here.
-        Left = 0;
-        Top = 0;
-        Width = SystemParameters.PrimaryScreenWidth;
-        Height = SystemParameters.PrimaryScreenHeight;
+        // Caller-supplied per-monitor bounds (MonitorHelper), not WindowState=Maximized - see the
+        // XAML comment for why Maximized alone does not actually reach the screen edges here.
+        Left = screenBounds.Left;
+        Top = screenBounds.Top;
+        Width = screenBounds.Width;
+        Height = screenBounds.Height;
 
         Box.Severity = request.Severity;
         Box.Title = request.Title;
