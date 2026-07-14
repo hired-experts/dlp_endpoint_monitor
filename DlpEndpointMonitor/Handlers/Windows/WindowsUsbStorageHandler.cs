@@ -32,9 +32,9 @@ sealed class WindowsUsbStorageHandler : IUsbStorageHandler
     public void Handle(UsbDisableStorageCmd command)
     {
         var (success, error) = UsbActions.SetUsbStorageEnabled(false);
-        // Only sweep/start-polling on a successful registry write - a failed write means the
-        // kill switch itself never took effect, so there is nothing new to retroactively enforce
-        // or watch for (see ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md section 4.1).
+        // Only sweep/start-polling on a successful registry write - a failed write means the kill
+        // switch itself never took effect, so there is nothing new to retroactively enforce or
+        // watch for.
         if (success)
         {
             Task.Run(_blockAlreadyConnectedStorage);

@@ -4,15 +4,12 @@ using DlpEndpointMonitor.AlertContracts;
 namespace DlpEndpointMonitor.AlertHost;
 
 /// <summary>
-/// The single in-memory queue owned by the pipe-owning AlertHost process. A dispatcher loop
-/// drains it one alert at a time - never two windows visible at once - applying two policies
-/// on the way in:
-///   COALESCE - while an alert of the same (Type, Severity) is already queued (or is the one
-///   currently being shown and hasn't been dequeued into a fresh pending slot yet), a new
-///   request of that same pair does not open a second window; it increments a running count
-///   that gets folded into the next shown message's title instead.
-///   CAP - at most <see cref="MaxPending"/> distinct pending entries are held; anything beyond
-///   that is dropped, and the drop is logged so it is never silent.
+/// The single in-memory queue owned by the pipe-owning AlertHost process. A dispatcher loop drains
+/// it one alert at a time - never two windows visible at once - applying two policies on the way
+/// in: COALESCE (a new request matching an already-queued/showing (Type, Severity) pair doesn't
+/// open a second window; it increments a running count folded into the next shown message's title)
+/// and CAP (at most <see cref="MaxPending"/> distinct pending entries are held; anything beyond
+/// that is dropped, and the drop is logged so it is never silent).
 /// </summary>
 public sealed class AlertQueue : IDisposable
 {
@@ -46,15 +43,13 @@ public sealed class AlertQueue : IDisposable
         _show = show;
         _dispatchLoop = Task.Run(() => DispatchLoopAsync(_cts.Token));
 
-        // Makes a dead dispatch loop observable instead of silently vanishing. Root cause is not
-        // yet proven (see ALERTHOST-STALE-PROCESS-FIX-PLAN.md SS3/SS6 - most likely candidate is
-        // _signal.WaitAsync throwing something other than OperationCanceledException, outside the
-        // loop's own inner try/catch which only wraps the per-alert _show call) - deliberately NOT
-        // a self-restart here, only logging: self-healing is called out there as a separate, later
-        // design decision once the actual trigger is known. Without this, .NET's default
-        // unobserved-task-exception behavior just discards the fault silently, and a
-        // CreateProcessAsUser-launched GUI process has no console for Console.Error to reach
-        // either - a dedicated log file is the only place this would ever be visible at all.
+        // Makes a dead dispatch loop observable instead of silently vanishing. Root cause is not yet
+        // proven - the likeliest candidate is _signal.WaitAsync throwing something other than
+        // OperationCanceledException, outside the loop's own inner try/catch which only wraps the
+        // per-alert _show call. Deliberately NOT a self-restart here, only logging, until the actual
+        // trigger is known. Without this, .NET's default unobserved-task-exception behavior discards
+        // the fault silently, and a CreateProcessAsUser-launched GUI process has no console for
+        // Console.Error to reach either - a log file is the only place this would ever be visible.
         _dispatchLoop.ContinueWith(
             t => LogDispatchLoopFault(t.Exception!),
             CancellationToken.None,

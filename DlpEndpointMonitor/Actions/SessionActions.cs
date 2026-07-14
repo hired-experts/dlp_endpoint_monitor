@@ -35,20 +35,13 @@ static class SessionActions
 
     /// <summary>
     /// Kills any process at <paramref name="exePath"/> already running in
-    /// <paramref name="sessionId"/> (excluding this process itself). Used at TWO points in the
-    /// companion lifecycle, both closing the same gap: nothing previously stopped a companion from
-    /// lingering once orphaned, whether that happened because a PRIOR primary generation exited
-    /// without cleaning up after itself (called again just before launching a fresh companion, so
-    /// restarts replace rather than accumulate), or because THIS primary is shutting down right now
-    /// (called from Program.cs's shutdown path and WindowsControlHandler's ShutdownCmd, so an
-    /// uninstall/service-stop/`shutdown` command doesn't leave today's companion behind for the
-    /// next start to clean up). Either way, a lingering companion still independently hooks the
-    /// clipboard/keyboard with whatever policy was current at ITS OWN startup, silently enforcing
-    /// stale rules alongside (or after) the primary that owned it is gone - confirmed live: a
-    /// disabled clipboard-blacklist rule kept being enforced by an orphaned companion, and after an
-    /// MSI uninstall the companion was left running with no primary at all. Best-effort by design:
-    /// a failure to enumerate or kill any one process must never block the caller's own next step
-    /// (launching a new companion, or exiting) - partial cleanup beats none.
+    /// <paramref name="sessionId"/> (excluding this process itself). Called both just before
+    /// launching a fresh companion (so a restart replaces rather than accumulates) and from this
+    /// primary's own shutdown paths (so an uninstall/service-stop/`shutdown` command doesn't leave
+    /// today's companion behind) - a lingering companion otherwise keeps independently enforcing
+    /// whatever policy was current at ITS OWN startup (see AGENTS.md section 10). Best-effort by
+    /// design: a failure to enumerate or kill any one process must never block the caller's next
+    /// step.
     /// </summary>
     public static int TerminateCompanionProcesses(uint sessionId, string exePath)
     {
@@ -94,14 +87,10 @@ static class SessionActions
     /// <summary>
     /// Kills any <c>DlpEndpointMonitor.AlertHost.exe</c> already running in
     /// <paramref name="sessionId"/> - the same class of gap <see cref="TerminateCompanionProcesses"/>
-    /// closes for the companion, extended to the OTHER spawned child this binary never previously
-    /// reaped: confirmed live to survive a primary restart, a session change, and even two agent
-    /// self-updates untouched, quietly wedging its dispatch loop for the rest of that AlertHost's
-    /// process lifetime (see ALERTHOST-STALE-PROCESS-FIX-PLAN.md). A thin wrapper, not a
-    /// near-duplicate implementation: AlertHost's exe path is a fixed constant (it always lives
-    /// alongside the primary, same computation <c>AlertActions.ShowAlert</c> itself uses to launch
-    /// it), unlike the companion's caller-supplied <paramref name="exePath"/> above, so this just
-    /// resolves that one constant path and delegates the actual kill loop to
+    /// closes for the companion, extended to the other spawned child this binary never previously
+    /// reaped (see AGENTS.md section 10). AlertHost's exe path is a fixed constant (it always lives
+    /// alongside the primary), unlike the companion's caller-supplied <paramref name="exePath"/>
+    /// above, so this just resolves that path and delegates the kill loop to
     /// <see cref="TerminateCompanionProcesses"/> rather than re-implementing it.
     /// </summary>
     public static int TerminateStaleAlertHost(uint sessionId)

@@ -6,8 +6,7 @@ using DlpEndpointMonitor.Win32;
 namespace DlpEndpointMonitor.Monitors;
 
 /// <summary>
-/// Fills the gap in <c>usb_storage_blocked</c> described in
-/// ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md: a plain, single-function USB mass-storage
+/// Fills a detection gap in <c>usb_storage_blocked</c>: a plain, single-function USB mass-storage
 /// stick connecting while the usb_disable_storage kill switch is on never registers a device
 /// INTERFACE at all (USBSTOR.sys is the only candidate driver for the whole devnode, and it never
 /// binds), so <see cref="UsbMonitor"/>'s interface-arrival-based detection never sees it - not
@@ -15,19 +14,19 @@ namespace DlpEndpointMonitor.Monitors;
 /// additive detection path: it polls by USB BUS ENUMERATOR (<c>SetupDiGetClassDevsByEnumerator</c>
 /// with Enumerator="USB"), which only requires the USB bus driver to have enumerated the devnode
 /// at all - true the instant a device is physically present, independent of Setup Class
-/// assignment, interface registration, or any bound function driver (design doc section 4/7.1).
+/// assignment, interface registration, or any bound function driver.
 ///
-/// Lifecycle is tied to the kill switch, not free-running (design doc 4.1): <see cref="Start"/> is
-/// called from Program.cs at boot if the switch is already on, and from
+/// Lifecycle is tied to the kill switch, not free-running: <see cref="Start"/> is called from
+/// Program.cs at boot if the switch is already on, and from
 /// WindowsUsbStorageHandler.Handle(UsbDisableStorageCmd) after a successful registry write;
 /// <see cref="Stop"/> from Handle(UsbEnableStorageCmd). Both are idempotent no-ops when called
-/// while already in the target state (design doc 7.2).
+/// while already in the target state. See AGENTS.md section 10 for the full incident writeup.
 /// </summary>
 sealed class UsbStorageDriverlessPoll : IDisposable
 {
-    // "A few seconds" per design doc 7.2 - not finalized to a more precise value there; chosen to
-    // match this codebase's other debounce/poll timers' general order of magnitude
-    // (DisplayMonitor's 800ms WM_DISPLAYCHANGE debounce, the companion's whitelistReload poll).
+    // "A few seconds" - not finalized to a more precise value; chosen to match this codebase's
+    // other debounce/poll timers' general order of magnitude (DisplayMonitor's 800ms
+    // WM_DISPLAYCHANGE debounce, the companion's whitelistReload poll).
     const int DefaultPollIntervalMs = 3000;
 
     readonly TimeSpan _interval;
@@ -43,11 +42,10 @@ sealed class UsbStorageDriverlessPoll : IDisposable
     }
 
     /// <summary>
-    /// Starts the poll - a no-op if already running (design doc 7.2: a re-entrant
-    /// usb_disable_storage must not spawn a second, overlapping timer). Clears any leftover
-    /// seen-set state from a previous on/off cycle and arms the first-cycle baseline flag fresh,
-    /// so a later re-enable/re-disable's baseline cycle never inherits stale entries from a much
-    /// earlier cycle.
+    /// Starts the poll - a no-op if already running, so a re-entrant usb_disable_storage never
+    /// spawns a second, overlapping timer. Clears any leftover seen-set state from a previous
+    /// on/off cycle and arms the first-cycle baseline flag fresh, so a later re-enable/re-disable's
+    /// baseline cycle never inherits stale entries from a much earlier cycle.
     /// </summary>
     public void Start()
     {
@@ -64,11 +62,11 @@ sealed class UsbStorageDriverlessPoll : IDisposable
     }
 
     /// <summary>
-    /// Stops the poll - a no-op if already stopped. Blocks until any in-flight cycle (including
-    /// its own reschedule) has fully finished before returning - uses
-    /// <see cref="Timer.Dispose(WaitHandle)"/>, not the bare parameterless overload, precisely so
-    /// a fast re-toggle can never race a cycle still finishing from the previous Start() (design
-    /// doc 7.2). Clears the seen-set so a later Start()'s baseline starts from nothing.
+    /// Stops the poll - a no-op if already stopped. Blocks until any in-flight cycle (including its
+    /// own reschedule) has fully finished before returning - uses
+    /// <see cref="Timer.Dispose(WaitHandle)"/>, not the bare parameterless overload, precisely so a
+    /// fast re-toggle can never race a cycle still finishing from the previous Start(). Clears the
+    /// seen-set so a later Start()'s baseline starts from nothing.
     /// </summary>
     public void Stop()
     {
@@ -99,11 +97,10 @@ sealed class UsbStorageDriverlessPoll : IDisposable
     /// Lets a caller OTHER than this poll's own cycles - specifically
     /// <see cref="UsbMonitor"/>.HandleArrival's inline usb_storage_blocked check for a device that
     /// got a normal interface arrival despite the kill switch being on (e.g. a composite device
-    /// whose parent still enumerates via usbccgp.sys) - claim an instance ID before emitting.
-    /// Guards the SAME seen-set under the SAME lock this poll's own cycles use, so a device both
-    /// paths could independently notice is only ever reported once (design doc section 4.3 edge
-    /// case 1). Returns true (caller should emit) the first time anyone claims this instance ID;
-    /// false (already claimed - caller must NOT emit) every time after.
+    /// whose parent still enumerates via usbccgp.sys) - claim an instance ID before emitting. Guards
+    /// the SAME seen-set under the SAME lock this poll's own cycles use, so a device both paths
+    /// could independently notice is only ever reported once. Returns true the first time anyone
+    /// claims this instance ID, false every time after.
     /// </summary>
     public bool TryClaimNewArrival(string instanceId)
     {
@@ -121,12 +118,11 @@ sealed class UsbStorageDriverlessPoll : IDisposable
             if (present is null)
             {
                 // SetupDiGetClassDevsByEnumerator itself failed - distinct from "genuinely zero
-                // devnodes present". Returning an empty set here instead would make ReconcileCycle
-                // evict every currently-seen device as if it had all just unplugged, and the very
-                // next successful cycle would then report all of them as "new" - the exact
-                // misleading unchanged-state burst §4.2's baseline mechanism exists to prevent, just
-                // triggered by a Win32 hiccup instead of a timer restart. Skip reconciliation
-                // entirely this cycle (seen-set and the first-cycle flag both untouched) and retry
+                // devnodes present". Treating failure as an empty set would make ReconcileCycle
+                // evict every currently-seen device as if it had all just unplugged, and the next
+                // successful cycle would then misreport all of them as "new" - the same misleading
+                // burst the first-cycle baseline exists to prevent, just triggered by a Win32 hiccup
+                // instead of a timer restart. Skip reconciliation entirely this cycle and retry
                 // fresh next cycle.
                 EventEmitter.EmitError("usb_storage_driverless_poll", "device enumeration failed, skipping this cycle");
                 return;
@@ -163,9 +159,9 @@ sealed class UsbStorageDriverlessPoll : IDisposable
         }
         finally
         {
-            // MUST run unconditionally, even if the cycle body above threw (design doc 7.2) - a
-            // single bad cycle (a transient enumeration failure) must never permanently end this
-            // feature until the next process restart.
+            // MUST run unconditionally, even if the cycle body above threw - a single bad cycle
+            // (a transient enumeration failure) must never permanently end this feature until the
+            // next process restart.
             Reschedule();
         }
     }
@@ -183,18 +179,17 @@ sealed class UsbStorageDriverlessPoll : IDisposable
 
     /// <summary>
     /// Enumerates every devnode the USB bus enumerator created (<c>SetupDiGetClassDevsByEnumerator</c>
-    /// with Enumerator="USB", DIGCF_PRESENT|DIGCF_ALLCLASSES - see design doc section 4/7.1),
-    /// regardless of Setup Class assignment or the total absence of one, and returns the instance
-    /// IDs of those whose Compatible IDs indicate mass-storage class via the existing,
-    /// already-unit-tested <see cref="UsbActions.IsMassStorageDevice"/>. Deliberately NOT the
-    /// interface-based <see cref="UsbActions.EnumerateConnected"/> the rest of this codebase uses
-    /// elsewhere - a driverless devnode never registers a device INTERFACE at all, so that call
-    /// would never see it.
+    /// with Enumerator="USB", DIGCF_PRESENT|DIGCF_ALLCLASSES), regardless of Setup Class assignment
+    /// or the total absence of one, and returns the instance IDs of those whose Compatible IDs
+    /// indicate mass-storage class via the existing, already-unit-tested
+    /// <see cref="UsbActions.IsMassStorageDevice"/>. Deliberately NOT the interface-based
+    /// <see cref="UsbActions.EnumerateConnected"/> the rest of this codebase uses elsewhere - a
+    /// driverless devnode never registers a device INTERFACE at all, so that call would never see it.
     ///
-    /// Returns null (not an empty set) if the enumeration call itself fails - this is deliberately
-    /// distinguishable from "genuinely zero mass-storage devnodes present" so the caller can skip
-    /// reconciliation entirely for the cycle instead of misreading a Win32 hiccup as every
-    /// previously-seen device having just unplugged.
+    /// Returns null (not an empty set) if the enumeration call itself fails, distinguishable from
+    /// "genuinely zero mass-storage devnodes present" so the caller can skip reconciliation for the
+    /// cycle instead of misreading a Win32 hiccup as every previously-seen device having just
+    /// unplugged.
     /// </summary>
     static HashSet<string>? EnumerateMassStorageInstanceIds()
     {
@@ -231,21 +226,19 @@ sealed class UsbStorageDriverlessPoll : IDisposable
     }
 
     /// <summary>
-    /// Pure new/seen/evict decision for one poll cycle, factored out of <see cref="RunCycle"/> the
-    /// same way <see cref="UsbMonitor.ResolveGroupAnchorCore"/> is factored out of
-    /// ResolveGroupAnchor - no Win32 calls, so it is unit-testable against a plain HashSet the
-    /// test constructs itself (see DlpEndpointMonitor.Tests/UsbStorageDriverlessPollTests.cs).
-    /// Mutates <paramref name="seen"/> in place (adds newly-appeared IDs, removes evicted ones)
-    /// and returns which IDs fell into each bucket.
+    /// Pure new/seen/evict decision for one poll cycle, factored out of <see cref="RunCycle"/> so it
+    /// is unit-testable against a plain HashSet the test constructs itself (see
+    /// DlpEndpointMonitor.Tests/UsbStorageDriverlessPollTests.cs). Mutates <paramref name="seen"/>
+    /// in place (adds newly-appeared IDs, removes evicted ones) and returns which IDs fell into
+    /// each bucket.
     ///
-    /// <paramref name="isFirstCycle"/> (design doc section 4.2 step 3 / 7.2): the very first cycle
-    /// after a Start() silently baselines - every present ID is recorded as seen with nothing
-    /// reported as new, so a timer (re)start never produces a "several new blocks just happened"
-    /// burst for devices that were already there before the switch flipped. MUST be an explicit
-    /// caller-supplied flag, never inferred from <paramref name="seen"/> being empty - the
-    /// seen-set legitimately empties out on its own as devices disconnect (the evict branch
-    /// below), and re-arming baseline mode from that emptiness would silently swallow the next
-    /// genuine new arrival instead of reporting it.
+    /// <paramref name="isFirstCycle"/>: the very first cycle after a Start() silently baselines -
+    /// every present ID is recorded as seen with nothing reported as new, so a timer (re)start
+    /// never produces a "several new blocks just happened" burst for devices that were already
+    /// there before the switch flipped. MUST be an explicit caller-supplied flag, never inferred
+    /// from <paramref name="seen"/> being empty - the seen-set legitimately empties out on its own
+    /// as devices disconnect, and re-arming baseline mode from that emptiness would silently
+    /// swallow the next genuine new arrival instead of reporting it.
     /// </summary>
     internal static (List<string> newlyAppeared, List<string> evicted) ReconcileCycle(
         HashSet<string> seen, IReadOnlySet<string> currentlyPresent, bool isFirstCycle)

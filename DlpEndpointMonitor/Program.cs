@@ -85,23 +85,15 @@ if (args.Contains("--session-companion"))
                 companionReady.Set();
                 EventEmitter.EmitInfo("clipboard companion ready");
 
-                // Connecting to the primary's DisplayChangeRelay happens off this thread entirely,
-                // not inline here - its constructor blocks for up to ~2s, and doing that here (even
-                // AFTER displayRelayServer/bluetoothRelayServer below) would delay
-                // MessageWindow.RunMessageLoop from ever starting, meaning WM_CLIPBOARDUPDATE/
-                // keyboard-hook messages wouldn't pump during that window either. Sitting it
-                // sequentially on the entry thread BEFORE displayRelayServer/bluetoothRelayServer
-                // (as a first attempt at this fix did) was worse still: it delayed those two
-                // companion-hosted servers from ever being constructed, which made the primary's own
-                // ~2s connect retry for THEM race and lose against a companion that hadn't started
-                // listening yet - a real regression: "could not connect to companion pipe" for both
-                // display and bluetooth relays while clipboard (which doesn't depend on a
-                // companion-hosted server) worked fine. This companion's own message window lives in
-                // the interactive session, so it - not the headless Session-0 primary - is the one
-                // that actually receives WM_DISPLAYCHANGE; see
-                // DisplayMonitor.NotifyExternalDisplayChange for why WM_DEVICECHANGE alone isn't
-                // enough. Best-effort/fire-and-forget: Notify() never throws even if this connect is
-                // still in flight (or failed) when a display change happens.
+                // Connecting to the primary's DisplayChangeRelay happens off this thread entirely -
+                // its constructor blocks for up to ~2s, and doing that inline (before or after
+                // displayRelayServer/bluetoothRelayServer) would delay MessageWindow.RunMessageLoop
+                // from starting, or delay those servers from listening before the primary's own
+                // connect retries hit them (see AGENTS.md section 10 for the regression this caused).
+                // This companion's own message window lives in the interactive session, so it - not
+                // the headless Session-0 primary - is the one that actually receives WM_DISPLAYCHANGE.
+                // Best-effort/fire-and-forget: Notify() never throws even if this connect is still in
+                // flight (or failed) when a display change happens.
                 _ = Task.Run(() =>
                 {
                     try
@@ -193,15 +185,14 @@ if (args.Contains("--session-companion"))
 // Policy-only cleanup mode — launched by the Node agent's uninstall cleanup step
 // (cleanup-policies.ts) as a throwaway, one-shot process distinct from the real primary. Exists
 // because the real primary's normal startup unconditionally calls EnsureCompanionForActiveSession,
-// which would kill and replace whatever companion the REAL, still-running primary already has live
-// in the interactive session — self-inflicted protection gap during every uninstall (see
-// UNINSTALL-POLICY-CLEANUP-FIX-PLAN.md). This mode does ZERO session/companion/monitor work: no
-// EnsureCompanionForActiveSession, no UsbMonitor/BluetoothMonitor/DisplayMonitor/NetworkMonitor,
-// nothing that touches the interactive session at all. It just wires a CommandDispatcher straight
-// to the same default %ProgramData% policy files the real primary uses, so reset_all_policy /
-// usb_enable_storage / screenshot_block_disable / shutdown from the cleanup script mutate the real
-// state without disturbing anything live. Checked in the same early block as --schema/
-// --session-companion, before any of the real primary's own state is constructed.
+// which would kill and replace whatever companion a REAL, still-running primary already has live in
+// the interactive session — a self-inflicted protection gap during every uninstall. This mode does
+// ZERO session/companion/monitor work — no EnsureCompanionForActiveSession, no
+// UsbMonitor/BluetoothMonitor/DisplayMonitor/NetworkMonitor — it just wires a CommandDispatcher
+// straight to the same default %ProgramData% policy files the real primary uses, so
+// reset_all_policy/usb_enable_storage/screenshot_block_disable/shutdown from the cleanup script
+// mutate real state without disturbing anything live. Checked in the same early block as
+// --schema/--session-companion, before any of the real primary's own state is constructed.
 if (args.Contains("--policy-only"))
 {
     try
@@ -292,10 +283,10 @@ if (whitelist.IsEnabled && blacklist.IsEnabled)
         "Both whitelist and blacklist were enabled — both disabled. Use device_protection_status to check.");
 }
 
-// usb_storage_blocked's only detection path for a driverless mass-storage devnode (see
-// ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md) - must already be running if the kill switch
-// was left on across a restart, same "don't wait for a command to notice existing state" reasoning
-// as the whitelist/blacklist conflict check just above.
+// Additive detection path for a driverless mass-storage devnode that never registers a device
+// interface at all (see UsbStorageDriverlessPoll, AGENTS.md section 10) - must already be running
+// if the kill switch was left on across a restart, same "don't wait for a command to notice
+// existing state" reasoning as the whitelist/blacklist conflict check just above.
 var storagePoll = new UsbStorageDriverlessPoll();
 if (!UsbActions.IsUsbStorageEnabled())
 {
@@ -325,17 +316,13 @@ bool runClipboardLocally = true;
 ClipboardCompanionRelay.Server? relayServer = null;
 DisplayChangeRelay.Server? displayChangeRelayServer = null;
 
-// Reassigned below (inside EnsureCompanionForActiveSession) only when a companion is actually
-// launched, closing over the exact session/exePath used for that launch. `stopCompanion` itself
-// (passed to WindowsControlHandler's constructor further down, and invoked directly in this
-// process's own shutdown `finally` block) is a STABLE wrapper that always reads and invokes
-// whatever `currentStopCompanion` holds AT CALL TIME - the same indirection reasoning as
-// disableExternalDisplays/enableExternalDisplays/enumerateBluetoothDevices above applies here too:
-// WindowsControlHandler stores the delegate instance it's given in a readonly field at
-// construction, so if a later session-change relaunch reassigned a plain `stopCompanion` variable
-// directly, WindowsControlHandler would keep calling the STALE closure (the previous session's
-// exePath/session id) forever - a `shutdown` command would then fail to terminate the actually-
-// running companion. Routing through `currentStopCompanion` avoids that trap.
+// `stopCompanion` is a STABLE wrapper that always reads/invokes whatever `currentStopCompanion`
+// holds AT CALL TIME - the same indirection reasoning as disableExternalDisplays/
+// enableExternalDisplays/enumerateBluetoothDevices below. WindowsControlHandler captures the
+// delegate instance it's given in a readonly field at construction, so if a session-change
+// relaunch reassigned a plain `stopCompanion` variable directly, WindowsControlHandler would keep
+// calling the STALE closure (the previous session's exePath/session id) forever, and `shutdown`
+// would fail to terminate the actually-running companion.
 Action currentStopCompanion = () => { };
 Action stopCompanion = () =>
 {
@@ -356,18 +343,17 @@ Action stopCompanion = () =>
 };
 
 // How DisplayMonitor's two topology-mutating calls are invoked, and how BluetoothMonitor
-// enumerates paired devices. Default: this process calls DisplayActions/BluetoothActions directly
-// (interactive/dev run, or no user session to cross into yet). When a companion IS launched, these
-// route through the companion's relay instead - the only process whose SetDisplayConfig/
-// BluetoothActions.EnumerateConnected actually reaches the interactive desktop.
+// enumerates paired devices. Default: call DisplayActions/BluetoothActions directly (interactive/
+// dev run, or no user session yet). When a companion IS launched, these route through its relay
+// instead - the only process whose SetDisplayConfig/EnumerateConnected reaches the interactive
+// desktop.
 //
 // enumerateBluetoothDevices/disableExternalDisplays/enableExternalDisplays are each constructed
-// ONCE, right here, and passed ONCE into BluetoothMonitor/DisplayMonitor's constructors below -
-// those constructors store the exact Func<> INSTANCE in a private field, so reassigning these
-// outer variables later would do nothing (the monitor already holds the old delegate). Instead,
-// each Func<> reads FROM the mutable current*RelayClient variable on EVERY invocation, so swapping
-// THAT variable (done by EnsureCompanionForActiveSession below, on a real session change) changes
-// behavior without ever touching the Func<> instance the monitors captured at construction.
+// ONCE and passed ONCE into BluetoothMonitor/DisplayMonitor's constructors - those constructors
+// store the Func<> INSTANCE in a private field, so reassigning these outer variables later would
+// do nothing. Instead, each Func<> reads FROM the mutable current*RelayClient variable on EVERY
+// invocation, so EnsureCompanionForActiveSession can swap THAT variable on a session change
+// without ever touching the Func<> instance the monitors captured at construction.
 DisplayCompanionRelay.Client? currentDisplayRelayClient = null;
 Func<(bool ok, string? error)> disableExternalDisplays = () =>
     currentDisplayRelayClient is not null
@@ -394,24 +380,18 @@ uint? companionTargetSession = null;
 bool companionEverResolved   = false;
 
 // Re-derives "what session should own clipboard/keyboard/relay duties right now" and acts on any
-// change since the last call. Called once below (in place of what used to be a one-shot startup
-// block) and again later from OnSessionChanged whenever Windows reports a session transition
-// (WM_WTSSESSION_CHANGE) - e.g. Fast User Switching or a logout+different-user-login while this
-// service keeps running.
+// change since the last call - called once below and again from OnSessionChanged whenever Windows
+// reports a session transition (WM_WTSSESSION_CHANGE, e.g. Fast User Switching or a logout+
+// different-user-login).
 //
-// SCOPE (a deliberate limitation, not an oversight): this binary's OWN session never changes in
-// the real deployment (LocalSystem in Session 0). The only transition this function actually
-// repairs is "a companion was already launched into some interactive session, and the active
-// console session is now a DIFFERENT one" - it terminates the stale companion, launches a fresh
-// one into the new session, and rebuilds the relay clients so BluetoothMonitor/DisplayMonitor
-// start talking to the new companion, then forces a fresh compliance re-check (this is what
-// actually fixes stale enforcement after a user switch, not just the relay plumbing). It does NOT
-// attempt to tear down and rebuild this primary's own local clipboardMonitor/keyboardHook (that
-// would require reconstructing objects live on the message-pump thread - out of scope here). If
-// this process was started with runClipboardLocally staying true (no session yet, or the primary
-// itself is the interactive session), a later call here just re-runs the same startup decision
-// idempotently - harmless, and occasionally useful ("no session yet" at startup can resolve into a
-// real companion launch once a user finally logs on).
+// SCOPE: this binary's OWN session never changes in the real deployment (LocalSystem in Session 0).
+// The only transition this repairs is "a companion was already launched into some session, and the
+// active console session is now a DIFFERENT one" - it tears down the stale companion, launches a
+// fresh one, rebuilds the relay clients, and forces a fresh compliance re-check (the actual fix for
+// stale enforcement after a user switch). It does NOT rebuild this primary's own local
+// clipboardMonitor/keyboardHook live - that would require reconstructing objects on the
+// message-pump thread, out of scope here. A call while runClipboardLocally is still true just
+// re-runs the startup decision idempotently.
 void EnsureCompanionForActiveSession()
 {
     var activeSession = SessionActions.GetActiveConsoleSessionId();
@@ -454,14 +434,11 @@ void EnsureCompanionForActiveSession()
 
     string? exePath = Environment.ProcessPath; // this process's own executable path
 
-    // A companion from an OLDER session (only present on a genuine relaunch, not the first-ever
-    // call) must be stopped explicitly by ITS OWN session id - the stale-leftover kill below only
-    // ever targets `activeSession` (the NEW one), so a companion still running in the PREVIOUS
-    // session would otherwise never be found and killed, exactly the bug this whole fix targets.
-    // AlertHost gets the same treatment alongside it - it survives a session change exactly as
-    // silently as an un-reaped companion did (see SessionActions.TerminateStaleAlertHost) - but
-    // is gated only on the session-change condition itself, not on `exePath` (a companion-specific
-    // path the AlertHost cleanup doesn't need).
+    // A companion from an OLDER session must be stopped explicitly by ITS OWN session id - the
+    // stale-leftover kill below only targets `activeSession` (the NEW one), so a companion still
+    // running in the PREVIOUS session would otherwise never be found and killed. AlertHost gets the
+    // same treatment (see SessionActions.TerminateStaleAlertHost), gated only on the session-change
+    // condition, not on `exePath` (a companion-specific path AlertHost cleanup doesn't need).
     if (previousTargetSession is not null && previousTargetSession.Value != activeSession.Value)
     {
         if (exePath is not null)
@@ -503,29 +480,20 @@ void EnsureCompanionForActiveSession()
         runClipboardLocally = false;
 
         // The companion now owns clipboard/keyboard exclusively - tear down any local hooks this
-        // primary built earlier (e.g. at startup before a session existed yet). Both Dispose()
-        // calls are simple, thread-safe operations confirmed safe to call from any thread:
-        // KeyboardHook.Dispose -> UnhookWindowsHookEx (Win32-documented as callable from any
-        // thread, not just the installing one), ClipboardMonitor.Dispose -> a plain
-        // MessageWindow.ClipboardChanged -= event unsubscribe. This is the actual fix for
-        // "clipboard/screenshot policy never enforces until the service is restarted" - without
-        // it, a primary that built local (inert, Session-0-bound) hooks before a session existed
-        // never noticed a companion successfully took over later, and those dead hooks just sat
-        // there forever instead of ever being cleaned up. Safe as a no-op when both are already
-        // null (the common case: no local hooks were ever built).
+        // primary built earlier (e.g. at startup before a session existed yet). Both Dispose() calls
+        // are simple, thread-safe operations safe to call from any thread (KeyboardHook.Dispose ->
+        // UnhookWindowsHookEx, ClipboardMonitor.Dispose -> a plain event unsubscribe). This is the
+        // fix for "clipboard/screenshot policy never enforces until the service is restarted" -
+        // without it, local hooks built before a session existed were never torn down once a
+        // companion took over. Safe as a no-op when both are already null.
         if (clipboardMonitor is not null) { clipboardMonitor.Dispose(); clipboardMonitor = null; }
         if (localKeyboardHook is not null) { localKeyboardHook.Dispose(); localKeyboardHook = null; }
 
-        // Dispose the OLD client only AFTER the new one is assigned to the variable
-        // enumerateBluetoothDevices/disableExternalDisplays/enableExternalDisplays actually read
-        // from - see their declarations above - so there is never a window where the variable is
-        // null while a companion is genuinely up. A concurrent read racing this swap (e.g.
-        // DisplayMonitor.BlockNonCompliant running on another thread at the exact moment of a
-        // relaunch) is safe by construction: both Client.SendCommand and Client.Enumerate wrap
-        // their ENTIRE body in a broad catch (Exception), which already turns a disposed-pipe
-        // ObjectDisposedException (or any other failure) into a normal, harmless (false, reason) /
-        // empty-list result - see DisplayCompanionRelay.Client.SendCommand and
-        // BluetoothCompanionRelay.Client.Enumerate.
+        // Dispose the OLD client only AFTER the new one is assigned to the variable the Func<>
+        // delegates above read from, so there is never a window where it's null while a companion is
+        // genuinely up. A concurrent read racing this swap is safe by construction: both
+        // Client.SendCommand and Client.Enumerate wrap their entire body in a broad catch, turning a
+        // disposed-pipe ObjectDisposedException into a normal (false, reason)/empty-list result.
         var oldDisplayClient = currentDisplayRelayClient;
         currentDisplayRelayClient = new DisplayCompanionRelay.Client();
         oldDisplayClient?.Dispose();

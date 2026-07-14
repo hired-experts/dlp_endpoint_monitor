@@ -151,13 +151,11 @@ sealed class UsbMonitor : IDisposable
             // Network devices (NICs) are NetworkMonitor's exclusive territory - see OnDeviceChanged.
             var all = UsbActions.EnumerateConnected().Where(p => p.Kind != DeviceKind.Network).ToList();
 
-            // Bucket by composite-group so every sibling interface is judged together, not
-            // one at a time - this is what BlockDevice's own group check also does, done here
-            // once up front so BlockNonCompliant's own "allowed" logging/counting reflects it
-            // too, and so BlockDevice does not need to re-enumerate per device below.
-            // Devices with a Bluetooth ancestor are excluded from grouping: GetGroupId can
-            // resolve a Bluetooth-backed peripheral's "USB group" to the shared BT radio's own
-            // instance ID (the radio commonly sits above BTHENUM/BTHLEDEVICE in the tree), so
+            // Bucket by composite-group so every sibling interface is judged together (same check
+            // BlockDevice itself does), done once up front so this method's own counting/logging
+            // reflects it too. Devices with a Bluetooth ancestor are excluded from grouping:
+            // GetGroupId can resolve a Bluetooth peripheral's "USB group" to the shared BT radio's
+            // own instance ID (the radio often sits above BTHENUM/BTHLEDEVICE in the tree), so
             // grouping by raw GroupId there would wrongly lump unrelated devices together.
             var byGroup = all
                 .Where(d => d.GroupId is not null && !UsbActions.HasBluetoothAncestor(d.InstanceId) && d.Kind != DeviceKind.Network)
@@ -208,24 +206,14 @@ sealed class UsbMonitor : IDisposable
     internal const string StorageKillSwitchBlockedBy = "usb_storage_disabled";
 
     /// <summary>
-    /// Retroactively enforces the usb_disable_storage kill switch against mass-storage devices
-    /// that were already connected and mounted BEFORE the switch flipped - the USBSTOR registry
-    /// Start=4 write only prevents a FUTURE driver load, it has no effect on a device whose
-    /// driver is already bound and running. Skips Volume-interface siblings (Fix 1 - not an
-    /// independently disableable devnode; the enumeration filter below already excludes them, so
-    /// this is filtering, not a redundant re-check) and defers to IsProtectedInternal (Fix 2) for
-    /// each candidate before attempting to disable it - defense in depth alongside BlockDevice's
-    /// own gate for the normal policy path, not relying on either alone.
-    ///
-    /// Deliberately does NOT run the whitelist/blacklist group-compliance check BlockDevice runs -
-    /// the kill switch is a blanket, policy-independent block on ALL mass storage, not a
-    /// per-device whitelist/blacklist decision, so there is no "a sibling interface satisfies
-    /// whitelist" escape hatch here by design.
-    ///
-    /// Emits UsbStorageDeviceBlockedEvent/UsbStorageDeviceBlockFailedEvent - see their own doc
-    /// comments in EventEmitter.cs for why this is a third, distinct event pair rather than a
-    /// reuse of UsbDeviceBlockedEvent/UsbStorageBlockedEvent. Call on a ThreadPool thread after
-    /// usb_disable_storage's registry write succeeds.
+    /// Retroactively enforces the usb_disable_storage kill switch on mass-storage devices already
+    /// connected before the switch flipped - the USBSTOR registry write only blocks a FUTURE driver
+    /// load, not an already-bound one. Skips Volume-interface siblings (not independently
+    /// disableable) and re-checks IsProtectedInternal per candidate (defense-in-depth alongside
+    /// BlockDevice's own gate). Deliberately skips BlockDevice's whitelist/blacklist group check -
+    /// this is a blanket block, not a per-device policy decision. Emits its own
+    /// UsbStorageDeviceBlocked(Failed)Event pair (see EventEmitter.cs) rather than reusing
+    /// UsbDeviceBlockedEvent. See AGENTS.md section 10 for the incident this closes.
     /// </summary>
     public void BlockAlreadyConnectedStorage()
     {
@@ -283,16 +271,12 @@ sealed class UsbMonitor : IDisposable
     }
 
     /// <summary>
-    /// Decides whether a composite USB device, as a whole, satisfies policy by checking ALL of
-    /// its currently-known sibling interfaces rather than just one. A group is allowed if ANY
-    /// sibling individually matches an active whitelist rule (or whitelist is disabled); it is
-    /// blocked if ANY sibling individually matches an active blacklist rule. This exists
-    /// because Windows enumerates one physical composite device (e.g. a keyboard) as several
-    /// independent interfaces, each possibly resolving to a different DeviceKind - without
-    /// this, a whitelist entry for one kind (e.g. "keyboard") would not protect a sibling
-    /// interface of the SAME physical device that resolves to a different kind (e.g. "hid"),
-    /// and blocking that sibling can escalate to disabling the shared composite parent,
-    /// taking the whole physical device down including the interface that WAS allowed.
+    /// Judges a composite USB device as a whole rather than one interface at a time: allowed if ANY
+    /// sibling interface matches an active whitelist rule, blocked if ANY sibling matches
+    /// blacklist. Necessary because Windows enumerates one physical composite device (e.g. a
+    /// keyboard) as several interfaces that can each resolve to a different DeviceKind - without
+    /// this, blocking a non-matching sibling could escalate to disabling the shared composite
+    /// parent and take down an interface that WAS correctly whitelisted. See AGENTS.md section 10.
     /// </summary>
     bool IsGroupCompliant(IEnumerable<ParsedDevice> siblings, out bool anyBlocked)
     {
@@ -384,16 +368,12 @@ sealed class UsbMonitor : IDisposable
         EventEmitter.Emit(connectedEvent);
 
         // Purely observational, independent of the whitelist/blacklist decision above - never
-        // gates or changes `allowed`/`reason`, and fires regardless of what Kind resolved to.
-        // A mass-storage device connecting while USBSTOR is disabled never binds a storage
-        // driver, so it resolves as DeviceKind.Unknown here (see Core/UsbKind.cs) rather than
-        // DeviceKind.Storage - IsMassStorageDevice reads Compatible IDs directly off the devnode
-        // to detect this case, since Kind alone cannot. See PROJECT.md section 5.7.
-        // TryClaimNewArrival guards against double-reporting the same device this inline check
-        // and UsbStorageDriverlessPoll's own polling cycles could both independently notice (e.g.
-        // a composite device whose parent still gets a real interface arrival via usbccgp.sys
-        // even with its storage function driverless) - see
-        // ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md section 4.3 edge case 1.
+        // gates or changes `allowed`/`reason`. A driverless mass-storage device resolves as
+        // DeviceKind.Unknown here, not DeviceKind.Storage, so IsMassStorageDevice reads Compatible
+        // IDs directly off the devnode instead (see PROJECT.md section 5.7). TryClaimNewArrival
+        // dedupes against UsbStorageDriverlessPoll's own polling cycle independently noticing the
+        // same device (e.g. a composite device whose parent still gets a real interface arrival via
+        // usbccgp.sys even with its storage function driverless) - see AGENTS.md section 10.
         if (!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId)
             && _storagePoll.TryClaimNewArrival(parsed.InstanceId))
         {
@@ -452,15 +432,11 @@ sealed class UsbMonitor : IDisposable
         // usbEscalate guard further down (was two separate device-tree walks before).
         bool hasBtAncestor = UsbActions.HasBluetoothAncestor(parsed.InstanceId);
 
-        // GROUP COMPLIANCE: a physical composite device (e.g. a keyboard) enumerates as
-        // several independent interfaces, each possibly resolving to a different DeviceKind.
-        // Before blocking THIS interface, check whether any sibling interface of the SAME
-        // physical device already satisfies policy - if so, the device as a whole is allowed
-        // and must not be touched, even though this one interface's own kind does not match.
-        // Without this, blocking a non-matching sibling can escalate to disabling the shared
-        // composite parent below, taking the whole physical device down with it. Skipped for
-        // Bluetooth-backed devices - their "group" (if any) would be the shared radio, not a
-        // meaningful sibling set.
+        // GROUP COMPLIANCE: a composite device's siblings can resolve to different DeviceKinds, so
+        // check whether any sibling already satisfies policy before blocking THIS interface -
+        // otherwise blocking a non-matching sibling can escalate to disabling the shared composite
+        // parent below, taking the whole physical device down with it. Skipped for Bluetooth-backed
+        // devices - their "group" would be the shared radio, not a meaningful sibling set.
         if (parsed.GroupId is not null && !hasBtAncestor)
         {
             var siblings = knownGroupSiblings ?? UsbActions.EnumerateGroupSiblings(parsed.GroupId).ToList();
@@ -506,41 +482,20 @@ sealed class UsbMonitor : IDisposable
     }
 
     /// <summary>
-    /// The actual disable/escalate mechanics shared by <see cref="BlockDevice"/> (policy-triggered
-    /// block) and <see cref="BlockAlreadyConnectedStorage"/> (usb_disable_storage kill-switch
-    /// retroactive block) - factored out so both call the same Win32 sequence instead of
-    /// duplicating it. Callers run their own gates (IsProtectedInternal, IsVolumeInterface, group
-    /// compliance) and persist/emit for their own trigger BEFORE/AFTER calling this - it does
-    /// neither itself.
+    /// The actual disable/escalate mechanics shared by <see cref="BlockDevice"/> and
+    /// <see cref="BlockAlreadyConnectedStorage"/> - callers run their own gates (IsProtectedInternal,
+    /// IsVolumeInterface, group compliance) and persist/emit around this call; it does neither
+    /// itself.
     ///
-    /// Bluetooth-backed HID (BLE/classic): disables the device's own primary node
-    /// (GetBluetoothDeviceNode - the BTHLE\/BTHENUM\ node, never the HID leaf, since vendor
-    /// software like Logitech Options re-enables a disabled leaf on its own) instead of
-    /// unpairing it.
-    ///
-    /// Unpair (BluetoothActions.RemovePairing/RemovePairingAny via
-    /// UsbActions.GetBluetoothPairingCandidates) is intentionally NOT called here anymore -
-    /// a real production incident (see AGENTS.md "sharp edges") showed candidate resolution
-    /// walking up to the shared BTH\MS_BTHLE\ enumerator, which every Bluetooth device on the
-    /// machine sits under, not just rotated addresses of the SAME physical device, and
-    /// issuing a real BluetoothRemoveDevice call against an unrelated mouse's live pairing
-    /// while blocking an unrelated keyboard - the mouse never reconnected again, even after
-    /// the policy was removed and the user tried re-pairing manually through Windows Settings.
-    /// GetBluetoothPairingCandidates/RemovePairingAny/ResolveBluetoothBlock are left fully
-    /// intact and still unit-tested (UsbActionsParsingTests, BluetoothActionsParsingTests,
-    /// UsbMonitorTests) for a future fix that scopes candidates to the SAME device (e.g.
-    /// matching Vid/Pid) instead of every sibling under the shared enumerator - do not delete
-    /// them just because this call site stopped using them.
-    ///
-    /// Trade-off accepted: Windows Settings' Connected/Paired indicator reads the pairing
-    /// store, not devnode state, so a disable-only block still shows the device as
-    /// "Connected" there, and since the pairing itself survives, Windows may keep
-    /// re-establishing the underlying link whenever the device is in range - each reconnect
-    /// re-arrives a devnode and this method just re-disables it. Accepted in exchange for
-    /// never again touching a device other than the one policy actually matched:
-    /// GetBluetoothDeviceNode walks only THIS device's own ancestor chain (no
-    /// CM_Get_Child/CM_Get_Sibling fan-out to other devices), so it cannot repeat the
-    /// incident above by construction.
+    /// Bluetooth-backed HID disables the device's own primary node (GetBluetoothDeviceNode - never
+    /// the HID leaf, since vendor software like Logitech Options re-enables a disabled leaf on its
+    /// own) instead of unpairing it - unpairing via GetBluetoothPairingCandidates/RemovePairingAny
+    /// was removed from this call site after a real incident where candidate resolution reached an
+    /// unrelated device's live pairing instead of a stale sibling of the same device (see AGENTS.md
+    /// section 10); those helpers remain intact and unit-tested for a future Vid/Pid-scoped fix.
+    /// Trade-off: a disable-only block still shows as "Connected" in Windows Settings and may keep
+    /// reconnecting/re-disabling, but GetBluetoothDeviceNode only ever walks THIS device's own
+    /// ancestor chain, so it cannot repeat that incident by construction.
     /// </summary>
     static (bool ok, string? error, string? disabledId) DisableDeviceWithEscalation(ParsedDevice parsed, bool hasBtAncestor)
     {
@@ -610,31 +565,17 @@ sealed class UsbMonitor : IDisposable
     }
 
     /// <summary>
-    /// Decides whether a persisted <see cref="DisabledDeviceRecord"/> is now compliant with
-    /// current policy - i.e. whether <see cref="RestoreCompliant"/> should re-enable it.
-    ///
-    /// The record's own stored Vid/Pid/Kind is the identity of whichever INTERFACE originally
-    /// triggered the block, which for a composite device escalated to the shared parent (e.g.
-    /// a keyboard's generic-HID sibling interface) may be the WRONG identity to re-check - it
-    /// will never match a whitelist entry scoped to the interface that was actually meant to
-    /// be allowed (e.g. "keyboard"), leaving the whole physical device stuck disabled forever
-    /// even after policy is fixed. To avoid that:
-    /// - If other sibling interfaces of the same USB group are currently live (only a single
-    ///   leaf was disabled, not the whole composite parent), compliance is derived from THEIR
-    ///   current state via <see cref="IsGroupCompliant"/> - the record's own stale identity is
-    ///   not used at all.
-    /// - If the disabled instance IS the composite parent itself and no sibling is enumerable
-    ///   right now (the whole physical device is torn down), this returns true unconditionally
-    ///   so the caller re-enables it; Windows then re-enumerates every child interface, each
-    ///   firing a fresh arrival that re-evaluates group compliance with live data via
-    ///   <see cref="BlockDevice"/>, which re-disables it (at the correct granularity) if it is
-    ///   genuinely still non-compliant. Re-enabling is reversible (unlike eject), so this is a
-    ///   safe default even though it briefly makes a possibly-non-compliant device live again -
-    ///   the same kind of live-then-evaluate window every fresh plug-in already goes through.
-    /// - Otherwise (a plain leaf disable of a non-composite device, or no group info at all),
-    ///   falls back to the record's own stored identity, same as before this method existed.
-    /// Bluetooth-backed disabled peripherals skip all of this - there is no composite-group
-    /// concept for them; they are judged by their own stored identity unconditionally.
+    /// Decides whether a persisted <see cref="DisabledDeviceRecord"/> is now compliant with current
+    /// policy - i.e. whether <see cref="RestoreCompliant"/> should re-enable it. The record's own
+    /// stored Vid/Pid/Kind is whichever INTERFACE originally triggered the block, which for a
+    /// composite device may not match the whitelist entry meant to allow the physical device as a
+    /// whole - so if other sibling interfaces are still enumerable, compliance is derived from
+    /// THEIR live state via <see cref="IsGroupCompliant"/> instead of the record's stale identity.
+    /// If the disabled instance IS the composite parent and no sibling is enumerable, this returns
+    /// true unconditionally (re-enabling is reversible, and Windows re-enumerating each child
+    /// interface re-evaluates compliance fresh via <see cref="BlockDevice"/>). Otherwise falls back
+    /// to the record's own stored identity. Bluetooth-backed records skip all of this - no
+    /// composite-group concept applies to them.
     /// </summary>
     bool IsRecordCompliant(DisabledDeviceRecord d)
     {
@@ -669,18 +610,13 @@ sealed class UsbMonitor : IDisposable
         try
         {
             int restored = 0, stillBlocked = 0;
-            // Mac is not null -> a Bluetooth-blocked record, owned exclusively by
-            // BluetoothMonitor.RestoreCompliant; Kind==Network -> owned exclusively by
-            // NetworkMonitor.RestoreCompliant. Without this filter, a shared record could be
-            // re-enabled by two monitors racing on the same devnode, each emitting its own
-            // "unblocked" event for one restore action (a second, independently-discovered bug
-            // bundled into this change - see AGENTS.md/PROJECT.md bug history).
-            // BlockedBy==StorageKillSwitchBlockedBy is owned exclusively by RestoreStorageDisabled,
-            // same reasoning: without this exclusion, an UNRELATED whitelist/blacklist change that
-            // fires this same restore reconciliation (e.g. DeviceWhitelistDisableCmd) would
-            // re-enable a device the kill switch disabled while usb_disable_storage is still in
-            // effect, since IsRecordCompliant only ever consults whitelist/blacklist state, never
-            // IsUsbStorageEnabled - the kill switch must only ever be undone by usb_enable_storage.
+            // Mac is not null -> Bluetooth-blocked record (owned by BluetoothMonitor.RestoreCompliant);
+            // Kind==Network -> owned by NetworkMonitor.RestoreCompliant. Excluding them here prevents
+            // two monitors racing to re-enable the same devnode and double-emitting "unblocked" (see
+            // AGENTS.md/PROJECT.md bug history). BlockedBy==StorageKillSwitchBlockedBy is owned by
+            // RestoreStorageDisabled - IsRecordCompliant only ever consults whitelist/blacklist state,
+            // never IsUsbStorageEnabled, so an unrelated policy change must never re-enable a
+            // kill-switch-disabled device; only usb_enable_storage may undo that.
             foreach (var d in _disabled.GetAll().Where(d =>
                 d.Mac is null && d.Kind != DeviceKind.Network && d.BlockedBy != StorageKillSwitchBlockedBy))
             {
@@ -740,16 +676,14 @@ sealed class UsbMonitor : IDisposable
         records.Where(d => d.BlockedBy == StorageKillSwitchBlockedBy);
 
     /// <summary>
-    /// Symmetric restore for <see cref="BlockAlreadyConnectedStorage"/>: re-enables every
-    /// persisted record that sweep disabled that current whitelist/blacklist policy does not
-    /// ALSO want blocked, reusing <see cref="IsRecordCompliant"/> - the same compliance check
-    /// <see cref="RestoreCompliant"/> already runs - so a device blocked by both the kill switch
-    /// and an independent blacklist entry correctly stays blocked after usb_enable_storage alone
-    /// (the two enforcement paths never fight each other). Reuses UsbDeviceUnblockedEvent/
-    /// UsbDeviceUnblockFailedEvent, not a new event type - unlike blocking, un-blocking is the
-    /// same "give the device back" outcome RestoreCompliant already reports for every other
-    /// trigger, not a distinct kind of action. Call on a ThreadPool thread after
-    /// usb_enable_storage's registry write succeeds.
+    /// Symmetric restore for <see cref="BlockAlreadyConnectedStorage"/>: re-enables every persisted
+    /// record that sweep disabled that current whitelist/blacklist policy does not ALSO want
+    /// blocked, reusing <see cref="IsRecordCompliant"/> - so a device blocked by both the kill
+    /// switch and an independent blacklist entry stays blocked after usb_enable_storage alone (the
+    /// two enforcement paths never fight). Reuses UsbDeviceUnblockedEvent/UsbDeviceUnblockFailedEvent
+    /// rather than a new event type - un-blocking is the same outcome RestoreCompliant already
+    /// reports for every other trigger. Call on a ThreadPool thread after usb_enable_storage's
+    /// registry write succeeds.
     /// </summary>
     public void RestoreStorageDisabled()
     {

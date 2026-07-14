@@ -21,9 +21,9 @@ sealed class WindowsControlHandler : IControlHandler
     // wired into WindowsUsbProtectionHandler/WindowsClipboardProtectionHandler in Program.cs -
     // ResetAllPolicyCmd reuses them rather than owning a second copy of any policy state.
     // screenshotBlockPolicy: the same instance wired into WindowsScreenshotProtectionHandler -
-    // reset_all_policy means every policy domain, not just device/clipboard (see
-    // UNINSTALL-POLICY-CLEANUP-FIX-PLAN.md - screenshot-block-off is folded in here rather than
-    // added as a fourth explicit command from the Node side).
+    // reset_all_policy must cover every policy domain (device, clipboard, screenshot), so
+    // screenshot-block-off is folded in here rather than added as a fourth explicit command from
+    // the Node side.
     public WindowsControlHandler(
         Action stopCompanion,
         DeviceWhitelist whitelist, DeviceBlacklist blacklist,
@@ -51,15 +51,11 @@ sealed class WindowsControlHandler : IControlHandler
         Environment.Exit(0);
     }
 
-    // Clears all four lists in one call, each exactly as its own individual *Clear command
-    // already would - device whitelist also disables itself (an enabled-but-empty whitelist is
-    // deny-all, same "factory reset" reasoning as DeviceWhitelistClearCmd), the other three only
-    // empty (already the loosest state for a blacklist / for clipboard's non-conflicting model),
-    // matching DeviceBlacklistClearCmd/ClipboardWhitelistClearCmd/ClipboardBlacklistClearCmd
-    // exactly. This command does not replace those - each keeps working unchanged on its own.
-    // Screenshot-block is a bare enable/disable with no entries (ScreenshotBlockDisableCmd's own
-    // semantics), so "reset" for it is just SetEnabled(false) - folded in here rather than a
-    // separate command, so reset_all_policy means every policy domain, full stop.
+    // Clears all four lists in one call, each exactly as its own individual *Clear command already
+    // would - device whitelist also disables itself (an enabled-but-empty whitelist is deny-all,
+    // same "factory reset" reasoning as DeviceWhitelistClearCmd), the other three only empty. This
+    // command does not replace those - each keeps working unchanged on its own. Screenshot-block is
+    // a bare enable/disable with no entries, so "reset" for it is just SetEnabled(false).
     public void Handle(ResetAllPolicyCmd command) => CommandReply.After(command.Id,
         () =>
         {

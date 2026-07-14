@@ -1202,6 +1202,87 @@ what is and is not covered and why.
   own inner try/catch which only wraps the per-alert `_show` call), so self-healing is deferred as a
   separate, later decision once the real trigger is known; this fix's job is only to make a dead
   dispatch loop observable instead of silently vanishing.
+- **USB mass-storage safe-enforcement: three coupled fixes, all triggered by the same
+  `usb_disable_storage` kill switch, none of which touch each other's code path directly.** The
+  design doc that originally covered this (`USB-STORAGE-SAFE-ENFORCEMENT-FIX-DESIGN.md`) has since
+  been deleted now that the fix shipped - this entry is its only remaining write-up.
+  1. *Volume-interface block-failed noise.* `Actions/UsbActions.cs`'s `IsVolumeInterface` (checked
+     against the literal `GUID_DEVINTERFACE_VOLUME` string, `Actions/UsbActions.cs:291`) recognizes
+     a `STORAGE\Volume\...` interface path as a volume-namespace identity, not an independently
+     disableable devnode - `CM_Locate_DevNodeW` can never resolve it, so any `DisableDevice` attempt
+     against it was a guaranteed, deterministic failure. `UsbMonitor.BlockDevice`
+     (`Monitors/UsbMonitor.cs:445`) now checks this first and skips with an `EmitInfo` instead of
+     attempting (and failing) the disable - the real block still happens via the sibling
+     Disk/CDROM/TAPE-function interface's own independent `BlockDevice` call for the same physical
+     device. Confirmed live via this machine's own event log: every mass-storage arrival used to
+     produce a guaranteed `usb_device_block_failed` for its Volume sibling alongside the real block
+     of its Disk sibling.
+  2. *Internal boot disk exposed to `kind: storage` blacklist entries.* `IsProtectedInternal`
+     (`Actions/UsbActions.cs:551`) only ever routed `StrictInputKinds` (keyboard/mouse/hid/hub) and
+     `DeviceKind.Unknown` through the `IsBuiltIn` bus-ancestry check - `DeviceKind.Storage` was not
+     gated at all, so a `{kind: storage}` blacklist entry could reach a real `DisableDevice` call
+     against the machine's own internal boot disk, with nothing but Windows' own
+     `CR_NOT_DISABLEABLE` refusal standing between that and an actual bricked machine. Fixed by
+     adding `kind != DeviceKind.Storage` to the same gate check - mirrors the identical fix
+     `NetworkMonitor`/`IsBuiltIn` already got for built-in NICs (section 10, `DeviceKind.Network`
+     entry above).
+  3. *Already-connected storage untouched by the kill switch.* `usb_disable_storage` only ever wrote
+     the `USBSTOR` registry `Start` value - correct for preventing a FUTURE driver load, but a
+     no-op against a driver instance already bound and mounted at the moment the switch flips, so an
+     already-inserted USB drive stayed fully accessible until physically replugged.
+     `UsbMonitor.BlockAlreadyConnectedStorage()`/`RestoreStorageDisabled()`
+     (`Monitors/UsbMonitor.cs:230`/`:754`) retroactively disable/restore exactly those devices,
+     reusing the same `DisableDeviceWithEscalation` mechanics `BlockDevice` uses. This needed two
+     additive, deliberately-separate pieces rather than reusing existing ones: new events
+     `UsbStorageDeviceBlockedEvent`/`UsbStorageDeviceBlockFailedEvent`
+     (`Core/EventEmitter.cs:285`/`:292`) - NOT a new `Reason` value on `UsbDeviceBlockedEvent` (`Reason`
+     is contractually only `blacklist_match`/`whitelist_gate`) and NOT a reuse of the pre-existing,
+     purely-observational-with-no-failure-case `UsbStorageBlockedEvent`, since this action genuinely
+     can fail; and a new optional `BlockedBy` tag on `DisabledDeviceRecord`
+     (`Core/DisabledDevices.cs:24`, `internal const string StorageKillSwitchBlockedBy =
+     "usb_storage_disabled"` in `Monitors/UsbMonitor.cs:208`) so `RestoreCompliant`'s own
+     whitelist/blacklist reconciliation sweep (`Monitors/UsbMonitor.cs:685`) explicitly excludes
+     kill-switch-disabled records - without that exclusion, an unrelated policy mutation (e.g.
+     `DeviceWhitelistDisableCmd`) would silently re-enable a device the kill switch disabled while
+     `usb_disable_storage` was still in effect, since compliance checks never consult
+     `IsUsbStorageEnabled` on their own.
+- **`usb_storage_blocked` never fired for a driverless single-function mass-storage stick, because
+  interface-arrival notification cannot see a devnode with no driver bound at all.** Full design in
+  `ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md`; implementation in
+  `Monitors/UsbStorageDriverlessPoll.cs`. Root cause: `UsbMonitor.OnDeviceChanged` - and therefore
+  every USB event this process emits - is built entirely on `DBT_DEVICEARRIVAL`, which Windows only
+  sends when a driver actually registers a device interface. A composite mass-storage device still
+  gets one (`usbccgp.sys` binds the composite parent regardless of what happens to the storage
+  child), but a plain, single-function USB flash drive has USBSTOR.sys as the *only* candidate
+  driver for its entire devnode - with the kill switch on, no driver ever binds, so no interface is
+  ever registered and the device is completely invisible to this process, not just missing one
+  event. The fix is a separate, additive poll (`System.Threading.Timer`, never the message-pump
+  thread) that enumerates by USB BUS ENUMERATOR -
+  `SetupDiGetClassDevsByEnumerator(Enumerator: "USB", DIGCF_PRESENT | DIGCF_ALLCLASSES)` - rather
+  than by Setup Class. The original draft proposed enumerating `GUID_DEVCLASS_USB` membership, but
+  whether a truly driverless single-function devnode keeps ANY Setup Class assignment at all (versus
+  falling into an unclassified "Other devices" bucket a class-based enumeration would never see) was
+  unverifiable with the hardware available during design - enumerating by bus enumerator instead
+  sidesteps the question entirely, since it only requires the USB bus driver to have enumerated the
+  devnode at all, true the instant a device is physically present, independent of Setup Class,
+  interface registration, or any bound function driver. Each candidate devnode's Compatible IDs are
+  then run through the existing, already-unit-tested `UsbActions.IsMassStorageDevice`. The poll's
+  lifecycle is tied directly to the kill switch (`Start()`/`Stop()`, called from the
+  `usb_disable_storage`/`usb_enable_storage` command handlers and from boot if the switch is already
+  on), not free-running. **The very first cycle after every `Start()` silently baselines the seen
+  set instead of emitting** - every instance ID present on that first cycle is recorded as
+  already-seen with nothing reported as new; only the second cycle onward diffs against the previous
+  snapshot and emits `usb_storage_blocked` for genuinely new appearances. Without this, every timer
+  (re)start - a service restart with the switch already on, or a live `usb_disable_storage` call -
+  would treat everything already connected as "new" and fire a misleading "several new blocks just
+  happened" burst for devices that had not actually changed state at all; an earlier draft of this
+  design accepted that burst as harmless (like `EnumerateExisting`'s own startup re-announcement),
+  but revisited it as actively misleading for what `usb_storage_blocked` is supposed to mean (a
+  genuine transition, not "here's what's connected right now"). The poll shares its dedup seen-set
+  with `UsbMonitor.HandleArrival`'s own inline `usb_storage_blocked` check via
+  `TryClaimNewArrival(instanceId)` - both paths write into the same lock-guarded set before
+  emitting, so a composite device's storage child interface that both paths could independently
+  notice is only ever reported once, whichever path claims the instance ID first.
 
 ---
 
