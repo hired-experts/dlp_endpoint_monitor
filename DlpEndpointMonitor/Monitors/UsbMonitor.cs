@@ -11,16 +11,18 @@ sealed class UsbMonitor : IDisposable
     readonly DeviceWhitelist  _whitelist;
     readonly DeviceBlacklist  _blacklist;
     readonly DisabledDevices  _disabled;
+    readonly UsbStorageDriverlessPoll _storagePoll;
 
     readonly Dictionary<string, string> _groupAnchors = new(StringComparer.OrdinalIgnoreCase);
     readonly Lock _groupAnchorLock = new();
 
-    public UsbMonitor(MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist, DisabledDevices disabled)
+    public UsbMonitor(MessageWindow window, DeviceWhitelist whitelist, DeviceBlacklist blacklist, DisabledDevices disabled, UsbStorageDriverlessPoll storagePoll)
     {
-        _window    = window;
-        _whitelist = whitelist;
-        _blacklist = blacklist;
-        _disabled  = disabled;
+        _window      = window;
+        _whitelist   = whitelist;
+        _blacklist   = blacklist;
+        _disabled    = disabled;
+        _storagePoll = storagePoll;
         _window.DeviceChanged += OnDeviceChanged;
     }
 
@@ -387,7 +389,13 @@ sealed class UsbMonitor : IDisposable
         // driver, so it resolves as DeviceKind.Unknown here (see Core/UsbKind.cs) rather than
         // DeviceKind.Storage - IsMassStorageDevice reads Compatible IDs directly off the devnode
         // to detect this case, since Kind alone cannot. See PROJECT.md section 5.7.
-        if (!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId))
+        // TryClaimNewArrival guards against double-reporting the same device this inline check
+        // and UsbStorageDriverlessPoll's own polling cycles could both independently notice (e.g.
+        // a composite device whose parent still gets a real interface arrival via usbccgp.sys
+        // even with its storage function driverless) - see
+        // ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md section 4.3 edge case 1.
+        if (!UsbActions.IsUsbStorageEnabled() && UsbActions.IsMassStorageDevice(parsed.InstanceId)
+            && _storagePoll.TryClaimNewArrival(parsed.InstanceId))
         {
             EventEmitter.Emit(new UsbStorageBlockedEvent(
                 string.IsNullOrEmpty(parsed.Vid) ? null : parsed.Vid,

@@ -232,7 +232,9 @@ if (args.Contains("--policy-only"))
             clipboard:            new WindowsClipboardHandler(),
             usbStorage:           new WindowsUsbStorageHandler(
                 blockAlreadyConnectedStorage: () => { },
-                restoreStorageDisabled:       () => { }),
+                restoreStorageDisabled:       () => { },
+                startStoragePoll:             () => { },
+                stopStoragePoll:              () => { }),
             usbDevice:            new WindowsUsbDeviceHandler(),
             usbProtection:        new WindowsUsbProtectionHandler(policyDeviceWhitelist, policyDeviceBlacklist,
                 applyPolicy:    () => { },
@@ -288,6 +290,16 @@ if (whitelist.IsEnabled && blacklist.IsEnabled)
     blacklist.SetEnabled(false);
     EventEmitter.EmitError("startup_conflict",
         "Both whitelist and blacklist were enabled — both disabled. Use device_protection_status to check.");
+}
+
+// usb_storage_blocked's only detection path for a driverless mass-storage devnode (see
+// ai_agent_doc/USB-STORAGE-BLOCKED-POLL-DESIGN.md) - must already be running if the kill switch
+// was left on across a restart, same "don't wait for a command to notice existing state" reasoning
+// as the whitelist/blacklist conflict check just above.
+var storagePoll = new UsbStorageDriverlessPoll();
+if (!UsbActions.IsUsbStorageEnabled())
+{
+    storagePoll.Start();
 }
 
 // Signal set once the message window is ready
@@ -634,7 +646,7 @@ var msgThread = new Thread(() =>
     {
         window           = new MessageWindow();
         window.SessionChanged += OnSessionChanged; // WM_WTSSESSION_CHANGE -> debounced re-check of the active session (see EnsureCompanionForActiveSession above)
-        usbMonitor       = new UsbMonitor(window, whitelist, blacklist, disabled);
+        usbMonitor       = new UsbMonitor(window, whitelist, blacklist, disabled, storagePoll);
         bluetoothMonitor = new BluetoothMonitor(window, whitelist, blacklist, disabled, enumerateBluetoothDevices);
         displayMonitor   = new DisplayMonitor(window, whitelist, blacklist, disableExternalDisplays, enableExternalDisplays);
         networkMonitor   = new NetworkMonitor(window, whitelist, blacklist, disabled);
@@ -706,7 +718,9 @@ var dispatcher = new CommandDispatcher(
     clipboard:         new WindowsClipboardHandler(),
     usbStorage:        new WindowsUsbStorageHandler(
         blockAlreadyConnectedStorage: () => usbMonitor!.BlockAlreadyConnectedStorage(),
-        restoreStorageDisabled:       () => usbMonitor!.RestoreStorageDisabled()),
+        restoreStorageDisabled:       () => usbMonitor!.RestoreStorageDisabled(),
+        startStoragePoll:             storagePoll.Start,
+        stopStoragePoll:              storagePoll.Stop),
     usbDevice:         new WindowsUsbDeviceHandler(),
     usbProtection:     new WindowsUsbProtectionHandler(whitelist, blacklist,
         applyPolicy:    ApplyPolicy,
@@ -736,6 +750,7 @@ finally
     localKeyboardHook?.Dispose();
     relayServer?.Dispose(); // stop the companion relay listener, if one was hosted
     displayChangeRelayServer?.Dispose(); // stop the display-change-notify listener, if one was hosted
+    storagePoll.Dispose(); // stop the driverless-storage poll timer, if it was running
     currentDisplayRelayClient?.Dispose(); // release the display relay client, if one was constructed
     currentBluetoothRelayClient?.Dispose(); // release the bluetooth relay client, if one was constructed
     // Bounded cancel+dispose of the session-change debounce token, same atomic ordering as
