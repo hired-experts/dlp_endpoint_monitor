@@ -15,4 +15,17 @@ static class CommandReply
         if (reconcile is not null) Task.Run(reconcile);
         EventEmitter.Emit(new ReplyEvent(commandId, true));
     }
+
+    /// <summary>
+    /// Same shape as the Action-based overload above, but for a mutate step that can itself fail
+    /// validation (e.g. UsbDeviceList.Add/Remove/Set rejecting an all-null-fields input) - reconcile
+    /// only runs when mutate() actually changed something, and the reply carries the real (ok, error)
+    /// instead of always claiming success.
+    /// </summary>
+    public static void After(string? commandId, Func<(bool ok, string? error)> mutate, Action? reconcile = null)
+    {
+        var (ok, error) = mutate();
+        if (ok && reconcile is not null) Task.Run(reconcile);
+        EventEmitter.Emit(new ReplyEvent(commandId, ok, error));
+    }
 }

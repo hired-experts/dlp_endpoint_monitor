@@ -101,4 +101,61 @@ public class CommandReplyTests
 
         Assert.Equal(42, observedByReconcile);
     }
+
+    // ── USB-WHITELIST-BYPASS-FIX-PLAN.md section 3.5: the Func<(bool,string?)>-based overload ──
+    // (UsbDeviceList.Add/Remove/Set's rejecting mutate() shape) - reconcile must only run when
+    // mutate() actually reports ok:true; a rejected mutation (e.g. an all-null-fields Add/Remove/
+    // Set) changed nothing, so there is nothing to restore/re-apply.
+
+    // T-CMDREPLY-07: mutate() returning ok:true schedules reconcile exactly once.
+    [Fact]
+    public void FuncAfter_MutateOk_InvokesReconcileExactlyOnce()
+    {
+        int calls = 0;
+        void Reconcile() => Interlocked.Increment(ref calls);
+
+        CaptureStdout(() => CommandReply.After("1", () => (true, (string?)null), Reconcile));
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(2000);
+        while (Volatile.Read(ref calls) < 1 && DateTime.UtcNow < deadline) Thread.Sleep(5);
+
+        Assert.Equal(1, Volatile.Read(ref calls));
+    }
+
+    // T-CMDREPLY-08: mutate() returning ok:false must NEVER schedule reconcile - a rejected
+    // mutation acted on nothing, so reconciling would run against stale, unchanged state.
+    [Fact]
+    public void FuncAfter_MutateRejected_NeverInvokesReconcile()
+    {
+        int calls = 0;
+        void Reconcile() => Interlocked.Increment(ref calls);
+
+        CaptureStdout(() => CommandReply.After("1", () => (false, "rejected"), Reconcile));
+
+        // Give any wrongly-scheduled Task.Run a real chance to run before asserting it didn't.
+        Thread.Sleep(200);
+
+        Assert.Equal(0, Volatile.Read(ref calls));
+    }
+
+    // T-CMDREPLY-09: the reply event carries the real (ok, error) from mutate(), not a hardcoded
+    // ok:true the way the Action-based overload always does.
+    [Fact]
+    public void FuncAfter_MutateRejected_ReplyCarriesOkFalseAndError()
+    {
+        string output = CaptureStdout(() => CommandReply.After("1", () => (false, "some error")));
+
+        using var doc = JsonDocument.Parse(output.Trim());
+        Assert.False(doc.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal("some error", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public void FuncAfter_MutateOk_ReplyCarriesOkTrueAndNullError()
+    {
+        string output = CaptureStdout(() => CommandReply.After("1", () => (true, (string?)null)));
+
+        using var doc = JsonDocument.Parse(output.Trim());
+        Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
+    }
 }

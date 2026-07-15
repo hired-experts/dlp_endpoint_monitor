@@ -275,12 +275,38 @@ var screenshotBlockPolicy = new ScreenshotBlockPolicy();
 
 // Conflict guard: if both lists were enabled on disk (e.g. direct file edit), disable both.
 // The client can query device_protection_status to understand the current state.
-if (whitelist.IsEnabled && blacklist.IsEnabled)
+// Refined below (not just "disable both blindly"): a corrupted whitelist.json fails CLOSED
+// (Enabled=true, DeviceWhitelist.CorruptedLoadFallback) on a machine that is genuinely running in
+// blacklist mode would otherwise trip this same conflict check and force-disable the machine's
+// real, correctly-configured blacklist as collateral damage - LoadFailed distinguishes a genuine
+// fallback from a real, direct-file-edit conflict so only the failed-load side is discarded.
+switch (StartupConflictResolver.Resolve(whitelist.IsEnabled, whitelist.LoadFailed, blacklist.IsEnabled, blacklist.LoadFailed))
 {
-    whitelist.SetEnabled(false);
-    blacklist.SetEnabled(false);
-    EventEmitter.EmitError("startup_conflict",
-        "Both whitelist and blacklist were enabled — both disabled. Use device_protection_status to check.");
+    case StartupConflictResolver.Action.DisableWhitelistOnly:
+        // whitelist's Enabled=true came from the fail-closed corruption fallback, not genuine
+        // configuration - the blacklist's own successfully-loaded state is the real intent here.
+        whitelist.SetEnabled(false);
+        EventEmitter.EmitError("startup_conflict",
+            "whitelist.json failed to load and defaulted to enabled (fail-closed); the blacklist's genuinely-loaded configuration takes precedence, whitelist fallback was discarded.");
+        break;
+
+    case StartupConflictResolver.Action.DisableBlacklistOnly:
+        // Symmetric case, even though DeviceBlacklist's own fallback is Enabled=false today -
+        // included so this logic stays correct if that ever changes, and for the (currently
+        // unreachable) case of a future blacklist-side fail-closed override.
+        blacklist.SetEnabled(false);
+        EventEmitter.EmitError("startup_conflict",
+            "blacklist.json failed to load; whitelist's genuinely-loaded configuration takes precedence, blacklist fallback was discarded.");
+        break;
+
+    case StartupConflictResolver.Action.DisableBoth:
+        // Both genuinely enabled (a real ambiguous conflict from direct file edits), or both
+        // failed to load simultaneously - unchanged existing behavior.
+        whitelist.SetEnabled(false);
+        blacklist.SetEnabled(false);
+        EventEmitter.EmitError("startup_conflict",
+            "Both whitelist and blacklist were enabled — both disabled. Use device_protection_status to check.");
+        break;
 }
 
 // Additive detection path for a driverless mass-storage devnode that never registers a device

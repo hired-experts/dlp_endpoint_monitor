@@ -69,6 +69,43 @@ public class UsbMonitorTests
     }
 }
 
+// USB-WHITELIST-BYPASS-FIX-PLAN.md section 1.4: UsbMonitor.DecideGroupBlock - the pure three-way
+// decision (Allow/LeafOnly/FullEscalation) that replaced the "any sibling compliant ⇒ whole group
+// compliant" bypass (Finding A). A sibling's own compliance is never a reason to allow a
+// DIFFERENT, non-compliant interface (parsedCompliant alone decides Allow) - it only ever
+// downgrades an escalating block to a leaf-only one (anyOtherSiblingCompliant), never upgrades a
+// non-compliant interface to Allow.
+public class UsbMonitorDecideGroupBlockTests
+{
+    [Fact]
+    public void DecideGroupBlock_ParsedCompliant_ReturnsAllow_RegardlessOfSiblings()
+    {
+        Assert.Equal(UsbMonitor.GroupBlockDecision.Allow,
+            UsbMonitor.DecideGroupBlock(parsedCompliant: true, anyOtherSiblingCompliant: false));
+    }
+
+    [Fact]
+    public void DecideGroupBlock_ParsedCompliantAndSiblingCompliant_StillReturnsAllow()
+    {
+        Assert.Equal(UsbMonitor.GroupBlockDecision.Allow,
+            UsbMonitor.DecideGroupBlock(parsedCompliant: true, anyOtherSiblingCompliant: true));
+    }
+
+    [Fact]
+    public void DecideGroupBlock_ParsedNonCompliantButSiblingCompliant_ReturnsLeafOnly_NeverAllow()
+    {
+        Assert.Equal(UsbMonitor.GroupBlockDecision.LeafOnly,
+            UsbMonitor.DecideGroupBlock(parsedCompliant: false, anyOtherSiblingCompliant: true));
+    }
+
+    [Fact]
+    public void DecideGroupBlock_NeitherParsedNorSiblingCompliant_ReturnsFullEscalation()
+    {
+        Assert.Equal(UsbMonitor.GroupBlockDecision.FullEscalation,
+            UsbMonitor.DecideGroupBlock(parsedCompliant: false, anyOtherSiblingCompliant: false));
+    }
+}
+
 // T-USBMON-05..08: UsbMonitor.ResolveGroupAnchorCore - the pure get-or-create decision behind the
 // group-anchor correlation feature (a composite device's SourceEventId), factored out the same way
 // ResolveBluetoothBlock is - no locking, no Win32, just the dictionary logic, so it is driven here

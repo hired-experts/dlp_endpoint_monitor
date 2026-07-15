@@ -289,4 +289,185 @@ public class UsbDeviceListTests
             Assert.True(blacklist.IsBlocked("aa:bb:cc:dd:ee:ff", DeviceKind.Mouse));
         });
     }
+
+    // ── USB-WHITELIST-BYPASS-FIX-PLAN.md section 2.5: corrupted-load fallback ──────────
+    // A whitelist's safe failure direction is deny-all (fail CLOSED); a blacklist's is
+    // unchanged (fail OPEN, i.e. nothing blocked) - see UsbDeviceList.CorruptedLoadFallback.
+
+    [Fact]
+    public void Whitelist_CorruptedFile_FailsClosed_EnabledTrueLoadFailedTrueNoEntries()
+    {
+        WithTempDir(dir =>
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "whitelist.json"), "{ this is not valid json");
+
+            var whitelist = new DeviceWhitelist(dir);
+
+            Assert.True(whitelist.IsEnabled);
+            Assert.True(whitelist.LoadFailed);
+            Assert.Empty(whitelist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void Blacklist_CorruptedFile_StaysDisabled_ButLoadFailedTrueNoEntries()
+    {
+        WithTempDir(dir =>
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "blacklist.json"), "{ this is not valid json");
+
+            var blacklist = new DeviceBlacklist(dir);
+
+            Assert.False(blacklist.IsEnabled);
+            Assert.True(blacklist.LoadFailed);
+            Assert.Empty(blacklist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void CorruptedFile_CreatesTimestampedBackupCopy()
+    {
+        WithTempDir(dir =>
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(Path.Combine(dir, "whitelist.json"), "{ this is not valid json");
+
+            _ = new DeviceWhitelist(dir);
+
+            var backups = Directory.GetFiles(dir, "whitelist.json.corrupted-*");
+            Assert.Single(backups);
+        });
+    }
+
+    [Fact]
+    public void Whitelist_FileDoesNotExistYet_LoadFailedStaysFalse()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+
+            Assert.False(whitelist.LoadFailed);
+            Assert.False(whitelist.IsEnabled); // legitimate unconfigured default, not corruption
+        });
+    }
+
+    [Fact]
+    public void Blacklist_FileDoesNotExistYet_LoadFailedStaysFalse()
+    {
+        WithTempDir(dir =>
+        {
+            var blacklist = new DeviceBlacklist(dir);
+
+            Assert.False(blacklist.LoadFailed);
+            Assert.False(blacklist.IsEnabled);
+        });
+    }
+
+    // ── USB-WHITELIST-BYPASS-FIX-PLAN.md section 3.5: HasAnyIdentifyingField validation ──
+    // Rejects Add/Remove/Set mutations with no identifying field at all (Finding C: an
+    // all-null entry is a wildcard that would silently allow-all/block-all-wipe).
+
+    [Fact]
+    public void Add_AllNullFields_RejectedWithOkFalseAndNoEntryAdded()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+
+            var (ok, error) = whitelist.Add(new UsbDeviceEntry());
+
+            Assert.False(ok);
+            Assert.NotNull(error);
+            Assert.Empty(whitelist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void Add_KindOnlyEntry_StillSucceeds()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+
+            var (ok, error) = whitelist.Add(new UsbDeviceEntry(Kind: DeviceKind.Keyboard));
+
+            Assert.True(ok);
+            Assert.Null(error);
+            Assert.Single(whitelist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void Remove_AllNullCriteria_RejectedWithOkFalseAndNothingRemoved()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+            whitelist.Add(new UsbDeviceEntry(Vid: "046D", Pid: "C52B"));
+
+            var (ok, error) = whitelist.Remove();
+
+            Assert.False(ok);
+            Assert.NotNull(error);
+            Assert.Single(whitelist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void Remove_KindOnlyCriteria_StillSucceeds()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+            whitelist.Add(new UsbDeviceEntry(Kind: DeviceKind.Keyboard));
+
+            var (ok, error) = whitelist.Remove(kind: DeviceKind.Keyboard);
+
+            Assert.True(ok);
+            Assert.Null(error);
+            Assert.Empty(whitelist.GetAll());
+        });
+    }
+
+    [Fact]
+    public void Set_AnyEntryWithAllNullFields_RejectsWholeBatch_NothingApplied()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+            whitelist.Add(new UsbDeviceEntry(Vid: "AAAA", Pid: "BBBB")); // pre-existing state
+
+            var good = new UsbDeviceEntry(Vid: "046D", Pid: "C52B");
+            var bad  = new UsbDeviceEntry(); // no identifying fields at all
+
+            var (ok, error) = whitelist.Set([good, bad]);
+
+            Assert.False(ok);
+            Assert.NotNull(error);
+
+            // Set validates the whole batch BEFORE mutating - pre-existing state must survive
+            // untouched, and neither `good` nor `bad` should have been applied.
+            var all = whitelist.GetAll();
+            Assert.Single(all);
+            Assert.Equal("AAAA", all[0].Vid);
+        });
+    }
+
+    [Fact]
+    public void Set_AllEntriesValid_Succeeds()
+    {
+        WithTempDir(dir =>
+        {
+            var whitelist = new DeviceWhitelist(dir);
+
+            var (ok, error) = whitelist.Set(
+                [new UsbDeviceEntry(Vid: "046D", Pid: "C52B"), new UsbDeviceEntry(Kind: DeviceKind.Mouse)]);
+
+            Assert.True(ok);
+            Assert.Null(error);
+            Assert.Equal(2, whitelist.GetAll().Count);
+        });
+    }
 }

@@ -56,6 +56,25 @@ abstract class UsbDeviceList
         Save();
     }
 
+    /// <summary>
+    /// True only if <see cref="Load"/> hit its catch block (a genuine parse/read failure) - never
+    /// true for the legitimate "file doesn't exist yet" case, which is a normal, unconfigured
+    /// startup state, not a corruption.
+    /// </summary>
+    public bool LoadFailed { get; private set; }
+
+    /// <summary>
+    /// The state to fall back to when the persisted file exists but fails to load (corrupted,
+    /// truncated, unreadable) - deliberately distinct from the "file simply doesn't exist yet"
+    /// case (which always means "nothing configured", handled separately, before this is ever
+    /// consulted). Base default is fail-open (Enabled=false) - safe for a blacklist, where
+    /// "nothing blocked" is already the system's normal unconfigured state. Overridden by
+    /// DeviceWhitelist to fail CLOSED instead, since an allow-list's safe failure direction is
+    /// deny-all: we cannot know what the corrupted file used to permit, so the conservative
+    /// assumption is "permit nothing" rather than "permit everything."
+    /// </summary>
+    protected virtual UsbDeviceListState CorruptedLoadFallback() => new();
+
     // ── Matching ──────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -105,8 +124,19 @@ abstract class UsbDeviceList
         string.Equals(a.Mac,    b.Mac,    StringComparison.OrdinalIgnoreCase) &&
         a.Kind == b.Kind;
 
-    public void Add(UsbDeviceEntry device)
+    // An entry/criteria set with no identifying field at all is a wildcard - `Add` would create a
+    // match-everything entry (whitelist mode becomes allow-all; blacklist mode becomes block-all),
+    // and `Remove` would delete every entry (whitelist degrades to deny-all; blacklist fails OPEN,
+    // wiping every block). Reject at the point of mutation so every current and future caller is
+    // covered, not just today's command-handler call sites.
+    static bool HasAnyIdentifyingField(string? vid, string? pid, string? serial, string? mac, DeviceKind? kind) =>
+        vid is not null || pid is not null || serial is not null || mac is not null || kind is not null;
+
+    public (bool ok, string? error) Add(UsbDeviceEntry device)
     {
+        if (!HasAnyIdentifyingField(device.Vid, device.Pid, device.Serial, device.Mac, device.Kind))
+            return (false, "at least one of vid/pid/serial/mac/kind is required");
+
         _lock.EnterWriteLock();
         try
         {
@@ -114,10 +144,14 @@ abstract class UsbDeviceList
         }
         finally { _lock.ExitWriteLock(); }
         Save();
+        return (true, null);
     }
 
-    public void Remove(string? vid = null, string? pid = null, string? serial = null, string? mac = null, DeviceKind? kind = null)
+    public (bool ok, string? error) Remove(string? vid = null, string? pid = null, string? serial = null, string? mac = null, DeviceKind? kind = null)
     {
+        if (!HasAnyIdentifyingField(vid, pid, serial, mac, kind))
+            return (false, "at least one of vid/pid/serial/mac/kind is required");
+
         _lock.EnterWriteLock();
         try
         {
@@ -130,20 +164,29 @@ abstract class UsbDeviceList
         }
         finally { _lock.ExitWriteLock(); }
         Save();
+        return (true, null);
     }
 
-    /// <summary>Replace the entire list atomically, dropping duplicate devices.</summary>
-    public void Set(IEnumerable<UsbDeviceEntry> devices)
+    /// <summary>Replace the entire list atomically, dropping duplicate devices. Validates every
+    /// entry BEFORE mutating anything, so a Set either fully applies or fully rejects - never
+    /// partially applies with some entries silently dropped.</summary>
+    public (bool ok, string? error) Set(IEnumerable<UsbDeviceEntry> devices)
     {
+        var list = devices.ToList();
+        foreach (var d in list)
+            if (!HasAnyIdentifyingField(d.Vid, d.Pid, d.Serial, d.Mac, d.Kind))
+                return (false, $"entry with no identifying fields is not allowed (label={d.Label})");
+
         _lock.EnterWriteLock();
         try
         {
             _state.Entries.Clear();
-            foreach (var d in devices)
+            foreach (var d in list)
                 if (!_state.Entries.Any(e => SameDevice(e, d))) _state.Entries.Add(d);
         }
         finally { _lock.ExitWriteLock(); }
         Save();
+        return (true, null);
     }
 
     public void Clear()
@@ -196,7 +239,7 @@ abstract class UsbDeviceList
 
             string json = File.ReadAllText(_storagePath);
             var loaded  = JsonSerializer.Deserialize(json, AppJsonContext.Default.UsbDeviceListState);
-            if (loaded is null) return;
+            if (loaded is null) throw new InvalidDataException("deserialized to null");
 
             _lock.EnterWriteLock();
             try   { _state = loaded; }
@@ -207,7 +250,20 @@ abstract class UsbDeviceList
         }
         catch (Exception ex)
         {
-            EventEmitter.EmitError($"{GetType().Name}_load", $"{ex.Message} — starting empty");
+            _lock.EnterWriteLock();
+            try   { _state = CorruptedLoadFallback(); }
+            finally { _lock.ExitWriteLock(); }
+
+            LoadFailed = true;
+
+            EventEmitter.EmitError($"{GetType().Name}_load_corrupted",
+                $"{ex.Message} — falling back to {(_state.Enabled ? "deny-all (protective)" : "empty/disabled")}");
+
+            // Best-effort forensic preservation - a Save() later in this process's life would
+            // otherwise silently overwrite the only evidence of what went wrong. Never let a
+            // failure here mask the original error.
+            try { File.Copy(_storagePath, $"{_storagePath}.corrupted-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}", overwrite: false); }
+            catch { /* best-effort only */ }
         }
     }
 }

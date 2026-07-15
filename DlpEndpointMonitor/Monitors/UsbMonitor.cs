@@ -169,20 +169,11 @@ sealed class UsbMonitor : IDisposable
                 IReadOnlyList<ParsedDevice>? siblings =
                     parsed.GroupId is not null && byGroup.TryGetValue(parsed.GroupId, out var s) ? s : null;
 
-                // blacklisted mirrors "allowed"'s own group-vs-single-device branching, computed
-                // alongside it (not re-derived later) so a group-blocked verdict is credited to
-                // whichever sibling actually matched, never re-derived from parsed alone.
-                bool allowed, blacklisted;
-                if (siblings is not null)
-                {
-                    allowed = IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked;
-                    blacklisted = anyBlocked;
-                }
-                else
-                {
-                    blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
-                    allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
-                }
+                // Compliance is always this interface's own identity now - never "any sibling
+                // compliant" (see Finding A fix). siblings is still passed through to BlockDevice,
+                // which does its own individual-vs-leaf-only-vs-escalate decision.
+                bool blacklisted = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+                bool allowed = _whitelist.IsAllowed(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) && !blacklisted;
 
                 if (!allowed)
                 {
@@ -271,18 +262,29 @@ sealed class UsbMonitor : IDisposable
     }
 
     /// <summary>
-    /// Judges a composite USB device as a whole rather than one interface at a time: allowed if ANY
-    /// sibling interface matches an active whitelist rule, blocked if ANY sibling matches
-    /// blacklist. Necessary because Windows enumerates one physical composite device (e.g. a
-    /// keyboard) as several interfaces that can each resolve to a different DeviceKind - without
-    /// this, blocking a non-matching sibling could escalate to disabling the shared composite
-    /// parent and take down an interface that WAS correctly whitelisted. See AGENTS.md section 10.
+    /// Whether a single device's own identity satisfies policy on its own - the sole compliance
+    /// check now used everywhere a device (or one interface of a composite device) is judged. A
+    /// sibling's own compliance is never a reason to allow a different, non-compliant interface -
+    /// see <see cref="DecideGroupBlock"/> and AGENTS.md section 10 (Finding A fix).
     /// </summary>
-    bool IsGroupCompliant(IEnumerable<ParsedDevice> siblings, out bool anyBlocked)
-    {
-        anyBlocked = siblings.Any(s => _blacklist.IsBlocked(s.Vid, s.Pid, s.Serial, s.Kind));
-        return siblings.Any(s => _whitelist.IsAllowed(s.Vid, s.Pid, s.Serial, s.Kind));
-    }
+    bool IsIndividuallyCompliant(string vid, string pid, string? serial, DeviceKind kind) =>
+        _whitelist.IsAllowed(vid, pid, serial, kind) && !_blacklist.IsBlocked(vid, pid, serial, kind);
+
+    /// <summary>
+    /// Pure decision for how far a composite-group block should go, factored out the same way
+    /// <see cref="ResolveBluetoothBlock"/> is - no Win32, just the three-way outcome so it is
+    /// unit-testable. <paramref name="parsedCompliant"/> is whether the interface actually being
+    /// judged is itself individually compliant; <paramref name="anyOtherSiblingCompliant"/> is
+    /// whether any OTHER interface sharing its composite parent is. A compliant sibling only ever
+    /// downgrades an escalating block to a leaf-only one (to avoid collaterally disabling that
+    /// sibling) - it never allows the non-compliant interface outright.
+    /// </summary>
+    internal enum GroupBlockDecision { Allow, LeafOnly, FullEscalation }
+
+    internal static GroupBlockDecision DecideGroupBlock(bool parsedCompliant, bool anyOtherSiblingCompliant) =>
+        parsedCompliant ? GroupBlockDecision.Allow
+        : anyOtherSiblingCompliant ? GroupBlockDecision.LeafOnly
+        : GroupBlockDecision.FullEscalation;
 
     /// <summary>
     /// Get-or-establish the group-anchor EventId for <paramref name="groupId"/>: returns the
@@ -432,29 +434,67 @@ sealed class UsbMonitor : IDisposable
         // usbEscalate guard further down (was two separate device-tree walks before).
         bool hasBtAncestor = UsbActions.HasBluetoothAncestor(parsed.InstanceId);
 
-        // GROUP COMPLIANCE: a composite device's siblings can resolve to different DeviceKinds, so
-        // check whether any sibling already satisfies policy before blocking THIS interface -
-        // otherwise blocking a non-matching sibling can escalate to disabling the shared composite
-        // parent below, taking the whole physical device down with it. Skipped for Bluetooth-backed
-        // devices - their "group" would be the shared radio, not a meaningful sibling set.
+        // GROUP COMPLIANCE: a composite device's siblings can resolve to different DeviceKinds.
+        // This interface's OWN identity must itself be compliant to be allowed - a compliant
+        // sibling is never a reason to allow a different, non-compliant interface (that was the
+        // Finding A bypass: a whitelisted keyboard interface allowed an unrelated storage sibling
+        // to keep working). A compliant sibling IS still a reason to decline ESCALATING a block to
+        // the shared composite parent (which would collaterally disable that compliant sibling) -
+        // in that case only a leaf-scoped disable of this interface is attempted. Skipped for
+        // Bluetooth-backed devices - their "group" would be the shared radio, not a meaningful
+        // sibling set.
         if (parsed.GroupId is not null && !hasBtAncestor)
         {
             var siblings = knownGroupSiblings ?? UsbActions.EnumerateGroupSiblings(parsed.GroupId).ToList();
             if (!siblings.Any(s => s.InstanceId.Equals(parsed.InstanceId, StringComparison.OrdinalIgnoreCase)))
                 siblings = [.. siblings, parsed]; // the arriving/current interface itself must vote too
 
-            if (IsGroupCompliant(siblings, out bool groupBlocked) && !groupBlocked)
-            {
-                EventEmitter.EmitInfo(
-                    $"usb_group_allowed: {parsed.InstanceId} kind={parsed.Kind} groupId={parsed.GroupId} " +
-                    "- a sibling interface satisfies whitelist, skipping block");
-                return;
-            }
+            bool parsedCompliant = IsIndividuallyCompliant(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind);
+            bool anyOtherCompliant = siblings.Any(s =>
+                !s.InstanceId.Equals(parsed.InstanceId, StringComparison.OrdinalIgnoreCase) &&
+                IsIndividuallyCompliant(s.Vid, s.Pid, s.Serial, s.Kind));
 
-            // This live re-check is more authoritative than whatever reason the caller passed in
-            // (which may be stale by the time this Task.Run body actually executes) - same
-            // never-trust-a-single-interface principle as the compliance check just above.
-            reason = groupBlocked ? "blacklist_match" : "whitelist_gate";
+            switch (DecideGroupBlock(parsedCompliant, anyOtherCompliant))
+            {
+                case GroupBlockDecision.Allow:
+                    EventEmitter.EmitInfo($"usb_interface_allowed: {parsed.InstanceId} kind={parsed.Kind} - individually satisfies policy");
+                    return;
+
+                case GroupBlockDecision.LeafOnly:
+                    // A sibling on the SAME composite parent is itself compliant - escalating
+                    // (composite parent disable, or eject) would collaterally take it down too.
+                    // Attempt a LEAF-ONLY disable; never escalate here.
+                    var (leafOk, leafErr) = UsbActions.DisableDevice(parsed.InstanceId);
+                    string leafReason = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind)
+                        ? "blacklist_match" : "whitelist_gate";
+
+                    if (leafOk)
+                    {
+                        _disabled.Add(new DisabledDeviceRecord(parsed.InstanceId, parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind, GroupId: parsed.GroupId));
+                        var blockedEvent = new UsbDeviceBlockedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, leafReason, null, EventEmitter.Ts());
+                        string? anchor = ResolveGroupAnchor(parsed.GroupId, blockedEvent.EventId);
+                        if (anchor is not null) blockedEvent = blockedEvent with { SourceEventId = anchor };
+                        EventEmitter.Emit(blockedEvent);
+                    }
+                    else
+                    {
+                        // Honest residual gap: this interface cannot be disabled without also risking the
+                        // compliant sibling, and escalation is refused. Surface loudly - never silently
+                        // "usb_group_allowed" this case again.
+                        var failedEvent = new UsbDeviceBlockFailedEvent(parsed.Vid, parsed.Pid, parsed.Serial, parsed.UsbClass, parsed.Kind, parsed.ClassGuid, parsed.GroupId, parsed.InstanceId, leafReason,
+                            $"leaf disable failed ({leafErr}); escalation suppressed to protect a compliant sibling interface on the same composite device", null, EventEmitter.Ts());
+                        string? anchor = ResolveGroupAnchor(parsed.GroupId, failedEvent.EventId);
+                        if (anchor is not null) failedEvent = failedEvent with { SourceEventId = anchor };
+                        EventEmitter.Emit(failedEvent);
+                    }
+                    return;
+
+                case GroupBlockDecision.FullEscalation:
+                    reason = _blacklist.IsBlocked(parsed.Vid, parsed.Pid, parsed.Serial, parsed.Kind) ||
+                             siblings.Any(s => _blacklist.IsBlocked(s.Vid, s.Pid, s.Serial, s.Kind))
+                        ? "blacklist_match" : "whitelist_gate";
+                    break; // fall through to the existing DisableDeviceWithEscalation call below, unchanged
+            }
         }
 
         var (ok, error, disabledId) = DisableDeviceWithEscalation(parsed, hasBtAncestor);
@@ -566,34 +606,38 @@ sealed class UsbMonitor : IDisposable
 
     /// <summary>
     /// Decides whether a persisted <see cref="DisabledDeviceRecord"/> is now compliant with current
-    /// policy - i.e. whether <see cref="RestoreCompliant"/> should re-enable it. The record's own
-    /// stored Vid/Pid/Kind is whichever INTERFACE originally triggered the block, which for a
-    /// composite device may not match the whitelist entry meant to allow the physical device as a
-    /// whole - so if other sibling interfaces are still enumerable, compliance is derived from
-    /// THEIR live state via <see cref="IsGroupCompliant"/> instead of the record's stale identity.
-    /// If the disabled instance IS the composite parent and no sibling is enumerable, this returns
-    /// true unconditionally (re-enabling is reversible, and Windows re-enumerating each child
-    /// interface re-evaluates compliance fresh via <see cref="BlockDevice"/>). Otherwise falls back
-    /// to the record's own stored identity. Bluetooth-backed records skip all of this - no
-    /// composite-group concept applies to them.
+    /// policy - i.e. whether <see cref="RestoreCompliant"/> should re-enable it. The record's OWN
+    /// identity must itself satisfy policy - a sibling's compliance never authorizes restoring a
+    /// DIFFERENT function sharing its composite parent (mirrors the <see cref="BlockDevice"/> fix:
+    /// a whitelisted keyboard interface must not also restore a still-forbidden storage interface
+    /// on the same physical device). The one remaining legitimate reason to restore a
+    /// non-compliant record is if its InstanceId denotes the composite PARENT node itself (not a
+    /// leaf) and it has been completely torn down (no sibling interfaces left at all) -
+    /// re-enabling a fully torn-down parent is reversible, and Windows re-evaluates every child
+    /// interface fresh via <see cref="BlockDevice"/> the moment it re-arrives. Bluetooth-backed
+    /// records skip all of this - no composite-group concept applies to them.
     /// </summary>
     bool IsRecordCompliant(DisabledDeviceRecord d)
     {
         if (UsbActions.HasBluetoothAncestor(d.InstanceId))
-            return _whitelist.IsAllowed(d.Vid, d.Pid, d.Serial, d.Kind)
-                && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
+            return IsIndividuallyCompliant(d.Vid, d.Pid, d.Serial, d.Kind);
+
+        if (IsIndividuallyCompliant(d.Vid, d.Pid, d.Serial, d.Kind))
+            return true;
 
         string? groupId = UsbActions.GetGroupId(d.InstanceId);
         var siblings = groupId is not null ? UsbActions.EnumerateGroupSiblings(groupId).ToList() : [];
 
-        if (siblings.Count > 0)
-            return IsGroupCompliant(siblings, out bool anyBlocked) && !anyBlocked;
+        // The record's own identity is non-compliant. The ONLY remaining legitimate reason to
+        // restore it is if `d.InstanceId` denotes the composite PARENT node itself (not a leaf) and
+        // it has been completely torn down (no sibling interfaces left at all) - re-enabling a fully
+        // torn-down parent is reversible, and Windows re-evaluates every child interface fresh via
+        // BlockDevice the moment it re-arrives. This is unchanged from prior behavior for that
+        // specific case - not a group-compliance shortcut, just "nothing is left here to keep blocked."
+        if (siblings.Count == 0 && groupId is not null && groupId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase))
+            return true;
 
-        if (groupId is not null && groupId.Equals(d.InstanceId, StringComparison.OrdinalIgnoreCase))
-            return true; // torn-down composite parent - re-enable and let fresh arrivals re-evaluate
-
-        return _whitelist.IsAllowed(d.Vid, d.Pid, d.Serial, d.Kind)
-            && !_blacklist.IsBlocked(d.Vid, d.Pid, d.Serial, d.Kind);
+        return false; // a non-compliant leaf sharing a composite parent with live siblings stays blocked
     }
 
     /// <summary>
