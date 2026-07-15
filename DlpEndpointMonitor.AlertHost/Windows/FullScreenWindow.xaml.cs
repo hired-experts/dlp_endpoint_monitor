@@ -2,7 +2,6 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
 using DlpEndpointMonitor.AlertContracts;
-using DlpEndpointMonitor.AlertHost.Controls;
 
 namespace DlpEndpointMonitor.AlertHost.Windows;
 
@@ -29,7 +28,6 @@ public partial class FullScreenWindow : Window
         Box.Title = request.Title;
         Box.Message = request.Message;
         Box.Id = request.Id;
-        Backdrop.Background = SeverityBrushes.Resolve(Box, request.Severity);
 
         _timer = new DispatcherTimer
         {

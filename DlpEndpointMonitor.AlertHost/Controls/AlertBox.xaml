@@ -42,15 +42,61 @@
             <!-- Matches the outer Border's own top corners exactly; square on the bottom two
                  since the plain-white message body follows directly below with no visible seam
                  (same white background as the outer Border, so any radius mismatch there is
-                 invisible regardless). -->
-            <Border x:Name="HeaderBorder" Grid.Row="0" CornerRadius="20,20,0,0" Padding="24,18">
+                 invisible regardless). Background is the one shared brand blue for every
+                 AlertSeverity (see Resources/Colors.xaml) - severity is conveyed entirely by the
+                 icon below, not by color. -->
+            <Border x:Name="HeaderBorder" Grid.Row="0" CornerRadius="20,20,0,0" Padding="24,18"
+                    Background="{DynamicResource HeaderBrush}">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock x:Name="TitleText" Grid.Column="0" FontSize="18" FontWeight="SemiBold"
-                               TextWrapping="Wrap" VerticalAlignment="Center"/>
+
+                    <!-- Icon + title, nested so the icon gets a fixed Auto column and the title
+                         keeps a properly width-constrained "*" column to wrap into (a StackPanel
+                         here would give TitleText unbounded width and break wrapping). -->
+                    <Grid Grid.Column="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Severity icon: exactly one of the three below is Visible at a time -
+                             see AlertBox.xaml.cs ApplySeverityIcon. Built from plain shape
+                             primitives (Ellipse/Rectangle/Polygon/Line) on a fixed 24x24 canvas,
+                             not a Path geometry string, so the shape is directly readable from
+                             this markup alone rather than trusting an opaque path-data blob. -->
+                        <Grid Grid.Column="0" Width="24" Height="24" Margin="0,0,10,0" VerticalAlignment="Center">
+                            <Canvas x:Name="InfoIcon" Width="24" Height="24" Visibility="Collapsed">
+                                <Ellipse Canvas.Left="1" Canvas.Top="1" Width="22" Height="22"
+                                         Stroke="{DynamicResource SeverityForegroundBrush}" StrokeThickness="2"/>
+                                <Ellipse Canvas.Left="10.5" Canvas.Top="6" Width="3" Height="3"
+                                         Fill="{DynamicResource SeverityForegroundBrush}"/>
+                                <Rectangle Canvas.Left="10.5" Canvas.Top="10.5" Width="3" Height="7"
+                                           RadiusX="1" RadiusY="1" Fill="{DynamicResource SeverityForegroundBrush}"/>
+                            </Canvas>
+                            <Canvas x:Name="WarningIcon" Width="24" Height="24" Visibility="Collapsed">
+                                <Polygon Points="12,2 22,21 2,21" StrokeLineJoin="Round"
+                                         Stroke="{DynamicResource SeverityForegroundBrush}" StrokeThickness="2"/>
+                                <Rectangle Canvas.Left="10.5" Canvas.Top="8" Width="3" Height="7"
+                                           RadiusX="1" RadiusY="1" Fill="{DynamicResource SeverityForegroundBrush}"/>
+                                <Ellipse Canvas.Left="10.5" Canvas.Top="17" Width="3" Height="3"
+                                         Fill="{DynamicResource SeverityForegroundBrush}"/>
+                            </Canvas>
+                            <Canvas x:Name="BlockedIcon" Width="24" Height="24" Visibility="Collapsed">
+                                <Ellipse Canvas.Left="1" Canvas.Top="1" Width="22" Height="22"
+                                         Stroke="{DynamicResource SeverityForegroundBrush}" StrokeThickness="2.5"/>
+                                <Line X1="5" Y1="19" X2="19" Y2="5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Stroke="{DynamicResource SeverityForegroundBrush}" StrokeThickness="2.5"/>
+                            </Canvas>
+                        </Grid>
+
+                        <TextBlock x:Name="TitleText" Grid.Column="1" FontSize="18" FontWeight="SemiBold"
+                                   TextWrapping="Wrap" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource SeverityForegroundBrush}"/>
+                    </Grid>
+
                     <!-- Opt-in per window type via ShowCloseButton (only ToastWindow enables this
                          today - FullScreen keeps its click-the-backdrop-to-dismiss behavior) -
                          collapsed by default so it reserves no layout space unless a window

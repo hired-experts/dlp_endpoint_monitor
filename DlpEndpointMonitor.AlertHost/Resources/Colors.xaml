@@ -2,25 +2,32 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!--
-        Severity colors - taken verbatim from the control center's HSL design tokens
-        (dlp_v2/controlcenter/app/globals.css), already converted to hex by CRITERIA. Do not
-        recompute or approximate these; both AlertBox's header band and FullScreenWindow's
-        solid backdrop resolve through Controls/SeverityBrushes.cs so there is exactly one
-        place mapping AlertSeverity to a brush.
+        Header color - ONE brand blue for every AlertSeverity, not a per-severity traffic-light
+        scheme (no more red-for-Blocked/yellow-for-Warning). Severity is now conveyed entirely by
+        the icon AlertBox renders in its header (see AlertBox.xaml/.cs's InfoIcon/WarningIcon/
+        BlockedIcon), never by color. Value is the control center's "primary" token verbatim
+        (dlp_v2/controlcenter/app/globals.css, HSL 198 64% 48%, hex #2D9CCA) - the brand's own
+        CTA/interactive blue, already a calm, moderate intensity that reads fine full-bleed on
+        FullScreenWindow's edge-to-edge backdrop too.
     -->
-    <SolidColorBrush x:Key="InfoBrush" Color="#FF1B7FA9"/>
-    <SolidColorBrush x:Key="WarningBrush" Color="#FFEB980A"/>
-    <SolidColorBrush x:Key="BlockedBrush" Color="#FFEE3A3A"/>
+    <SolidColorBrush x:Key="HeaderBrush" Color="#FF2D9CCA"/>
 
-    <!-- All three severities use white header text over their color band. -->
+    <!-- Header text AND icon both use this over the color band above. -->
     <SolidColorBrush x:Key="SeverityForegroundBrush" Color="#FFFFFFFF"/>
 
-    <!-- Shared surface/background/body tokens, also from the same design-token source. -->
+    <!--
+        Shared surface/background/body tokens, taken verbatim from the same globals.css :root
+        block (rule 1 - these are all already moderate, no rule-2 adaptation needed):
+          card             (0 0% 100%)   #FFFFFF
+          background       (240 23% 97%) #F7F7FA
+          foreground       (237 56% 8%)  #090A20
+          border / input   (220 13% 91%) #E5E7EB
+          muted-foreground (220 9% 46%)  #6B7280
+    -->
     <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFFFF"/>
-    <SolidColorBrush x:Key="PageBackgroundBrush" Color="#FFF4F7F8"/>
-    <SolidColorBrush x:Key="BodyTextBrush" Color="#FF151B1F"/>
-    <SolidColorBrush x:Key="BorderBrush" Color="#FFDAE2E5"/>
-    <!-- muted foreground token (200 15% 50% HSL) - for secondary/de-emphasized text (e.g. the event ID row). -->
-    <SolidColorBrush x:Key="MutedForegroundBrush" Color="#FF6C8693"/>
+    <SolidColorBrush x:Key="PageBackgroundBrush" Color="#FFF7F7FA"/>
+    <SolidColorBrush x:Key="BodyTextBrush" Color="#FF090A20"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#FFE5E7EB"/>
+    <SolidColorBrush x:Key="MutedForegroundBrush" Color="#FF6B7280"/>
 
 </ResourceDictionary>

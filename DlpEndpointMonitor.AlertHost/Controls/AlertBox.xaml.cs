@@ -69,12 +69,12 @@ public partial class AlertBox : UserControl
     {
         InitializeComponent();
         // Constructor runs before any property setter fires the *Changed callbacks below, so
-        // apply the default severity's color up front rather than waiting on a first change.
-        ApplySeverityColor(Severity);
+        // apply the default severity's icon up front rather than waiting on a first change.
+        ApplySeverityIcon(Severity);
     }
 
     static void OnSeverityChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
-        ((AlertBox)d).ApplySeverityColor((AlertSeverity)e.NewValue);
+        ((AlertBox)d).ApplySeverityIcon((AlertSeverity)e.NewValue);
 
     static void OnTitleChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
         ((AlertBox)d).TitleText.Text = (string)e.NewValue;
@@ -93,10 +93,21 @@ public partial class AlertBox : UserControl
     static void OnShowCloseButtonChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
         ((AlertBox)d).CloseButton.Visibility = (bool)e.NewValue ? Visibility.Visible : Visibility.Collapsed;
 
-    void ApplySeverityColor(AlertSeverity severity)
+    // Color no longer distinguishes severity (see Resources/Colors.xaml's HeaderBrush) - this is
+    // the only place severity is conveyed, by showing exactly one of the three icon shapes
+    // declared in AlertBox.xaml (InfoIcon/WarningIcon/BlockedIcon) and collapsing the other two.
+    void ApplySeverityIcon(AlertSeverity severity)
     {
-        HeaderBorder.Background = SeverityBrushes.Resolve(this, severity);
-        TitleText.Foreground = (System.Windows.Media.Brush)FindResource("SeverityForegroundBrush");
+        (Visibility info, Visibility warning, Visibility blocked) = severity switch
+        {
+            AlertSeverity.Warning => (Visibility.Collapsed, Visibility.Visible, Visibility.Collapsed),
+            AlertSeverity.Blocked => (Visibility.Collapsed, Visibility.Collapsed, Visibility.Visible),
+            // Info, and any future/unmapped enum value, fails safe to the least alarming icon.
+            _ => (Visibility.Visible, Visibility.Collapsed, Visibility.Collapsed),
+        };
+        InfoIcon.Visibility = info;
+        WarningIcon.Visibility = warning;
+        BlockedIcon.Visibility = blocked;
     }
 
     // Stops an ordinary click on the card's own content from bubbling up to a parent window's
