@@ -90,7 +90,8 @@ public class SchemaExporterTests
     // UsbStorageStatusCmd, DeviceProtectionStatusCmd, DeviceWhitelistGetCmd, DeviceBlacklistGetCmd,
     // plus (added alongside clipboard protection) ClipboardProtectionStatusCmd,
     // ClipboardWhitelistGetCmd, ClipboardBlacklistGetCmd, plus (added alongside screenshot-block
-    // protection) ScreenshotBlockStatusCmd.
+    // protection) ScreenshotBlockStatusCmd, plus (added alongside the session-user event)
+    // SessionUserGetCmd.
     [Fact]
     public void Export_CmdReply_MatchesEmitsEventAttributeUsageExactly()
     {
@@ -110,6 +111,7 @@ public class SchemaExporterTests
             WireName(CommandType.ClipboardWhitelistGet),
             WireName(CommandType.ClipboardBlacklistGet),
             WireName(CommandType.ScreenshotBlockStatus),
+            WireName(CommandType.SessionUserGet),
         };
 
         Assert.Equal(expectedKeys, actualKeys);
@@ -124,6 +126,7 @@ public class SchemaExporterTests
         Assert.Equal(WireName(EventType.ClipboardWhitelistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardWhitelistGet)).GetString());
         Assert.Equal(WireName(EventType.ClipboardBlacklistGet), cmdReply.GetProperty(WireName(CommandType.ClipboardBlacklistGet)).GetString());
         Assert.Equal(WireName(EventType.ScreenshotBlockStatus), cmdReply.GetProperty(WireName(CommandType.ScreenshotBlockStatus)).GetString());
+        Assert.Equal(WireName(EventType.SessionUserChanged), cmdReply.GetProperty(WireName(CommandType.SessionUserGet)).GetString());
     }
 
     // T-SCHEMA-04 (regression half): confirm every command WITHOUT [EmitsEvent] really

@@ -71,6 +71,7 @@ interface IControlHandler
     void Handle(PingCmd command);
     void Handle(ShutdownCmd command);
     void Handle(ResetAllPolicyCmd command);
+    void Handle(SessionUserGetCmd command);
 }
 
 interface IAlertHandler

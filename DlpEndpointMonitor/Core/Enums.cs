@@ -51,6 +51,7 @@ public enum EventType
     [JsonStringEnumMemberName("usb_storage_blocked")]             UsbStorageBlocked,
     [JsonStringEnumMemberName("usb_storage_device_blocked")]      UsbStorageDeviceBlocked,
     [JsonStringEnumMemberName("usb_storage_device_block_failed")] UsbStorageDeviceBlockFailed,
+    [JsonStringEnumMemberName("session_user_changed")]             SessionUserChanged,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<CommandType>))]
@@ -102,6 +103,7 @@ public enum CommandType
     [JsonStringEnumMemberName("screenshot_block_enable")]  ScreenshotBlockEnable,
     [JsonStringEnumMemberName("screenshot_block_disable")] ScreenshotBlockDisable,
     [JsonStringEnumMemberName("screenshot_block_status")]  ScreenshotBlockStatus,
+    [JsonStringEnumMemberName("session_user_get")]       SessionUserGet,
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter<DeviceKind>))]

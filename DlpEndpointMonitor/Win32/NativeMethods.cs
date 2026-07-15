@@ -494,6 +494,26 @@ static class NativeMethods
     [DllImport("wtsapi32.dll", SetLastError = true)]
     public static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
 
+    // Resolves who owns a session (SessionActions.GetCurrentSessionUser) - hServer is always
+    // IntPtr.Zero (WTS_CURRENT_SERVER_HANDLE, the local machine); the returned buffer is a
+    // WTSFreeMemory-owned native string, never freed by the caller directly. CharSet.Unicode is
+    // required - wtsapi32 exports no undecorated symbol, so an unmarked DllImport defaults to
+    // CharSet.Ansi and silently binds to WTSQuerySessionInformationA, whose ANSI buffer
+    // SessionActions.QuerySessionInfoString's Marshal.PtrToStringUni (UTF-16) would then misread,
+    // corrupting every username - matches every other string-returning P/Invoke in this file
+    // (SetupDiGetDeviceInstanceId etc.), which already sets this explicitly.
+    [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool WTSQuerySessionInformation(
+        IntPtr hServer, uint sessionId, int wtsInfoClass, out IntPtr ppBuffer, out uint pBytesReturned);
+
+    [DllImport("wtsapi32.dll")]
+    public static extern void WTSFreeMemory(IntPtr pMemory);
+
+    // WTS_INFO_CLASS values this binary actually uses (the enum has many more members we don't
+    // need) - named to match the Win32 enum member names exactly for grep-ability.
+    public const int WTSUserName   = 5;
+    public const int WTSDomainName = 7;
+
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern bool DuplicateTokenEx(
         IntPtr hExistingToken, uint dwDesiredAccess,

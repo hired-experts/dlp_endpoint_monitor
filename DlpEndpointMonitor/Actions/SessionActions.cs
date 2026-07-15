@@ -34,6 +34,77 @@ static class SessionActions
         => (uint)Process.GetCurrentProcess().SessionId == sessionId;
 
     /// <summary>
+    /// The single function every caller should use to answer "who is on the console right now" -
+    /// the session_user_get command calls this fresh on every request. Program.cs's proactive
+    /// session-change emit uses <see cref="ResolveSessionUser"/> directly instead (it already has
+    /// the session id resolved and must not re-query it a second time - see that overload's doc).
+    /// Ok is false only when the WTS query itself genuinely failed (e.g. a session torn down
+    /// between resolving the active session and querying it) - distinct from "a session exists but
+    /// no interactive user is resolved yet" (logon screen), which is Ok:true, Username:null.
+    /// </summary>
+    public static (bool Ok, uint? SessionId, string? Username) GetCurrentSessionUser()
+        => ResolveSessionUser(GetActiveConsoleSessionId());
+
+    /// <summary>
+    /// Resolves the username owning <paramref name="sessionId"/> without re-deriving the active
+    /// console session itself - callers that already have a session id in hand (Program.cs's
+    /// EnsureCompanionForActiveSession) must pass it in here rather than calling
+    /// <see cref="GetCurrentSessionUser"/>, so the reported SessionId can never disagree with the
+    /// session id the rest of that caller's logic is acting on. <paramref name="sessionId"/> null
+    /// means nobody is logged on at all (see <see cref="GetActiveConsoleSessionId"/>) - not a
+    /// failure, so Ok is true. Username is formatted "DOMAIN\User" when a domain is present, bare
+    /// "User" otherwise - the normal Windows display convention (see <see cref="FormatSessionUser"/>).
+    /// </summary>
+    public static (bool Ok, uint? SessionId, string? Username) ResolveSessionUser(uint? sessionId)
+    {
+        if (sessionId is null) return (true, null, null);
+
+        // WTSUserName is the query whose success/failure Ok reflects - a genuine WTS failure
+        // (session torn down mid-query) returns null here, distinct from a session that resolved
+        // fine but has no interactive user yet (logon screen), which returns "" (empty, not null).
+        string? username = QuerySessionInfoString(sessionId.Value, NativeMethods.WTSUserName);
+        if (username is null) return (false, sessionId, null);
+
+        // A domain-lookup failure is a much lower-stakes degradation (lose the "DOMAIN\" prefix,
+        // not the whole answer) - Ok still reflects only the primary username query above.
+        string? domain = QuerySessionInfoString(sessionId.Value, NativeMethods.WTSDomainName);
+        return (true, sessionId, FormatSessionUser(domain, username));
+    }
+
+    /// <summary>
+    /// Pure formatting rule, factored out for direct unit testing (matches this codebase's
+    /// existing precedent of extracting a pure decision core - e.g. UsbMonitor.DecideGroupBlock -
+    /// out of a Win32-calling method): empty username means "no interactive user resolved yet",
+    /// reported as null regardless of what domain came back; a present username is combined with
+    /// its domain when there is one, or reported bare otherwise.
+    /// </summary>
+    internal static string? FormatSessionUser(string? domain, string? username)
+    {
+        if (string.IsNullOrEmpty(username)) return null;
+        return string.IsNullOrEmpty(domain) ? username : $"{domain}\\{username}";
+    }
+
+    // CharSet.Unicode is required here, not optional: WTSQuerySessionInformation has no
+    // undecorated exported symbol, so an unmarked [DllImport] defaults to CharSet.Ansi and binds
+    // to WTSQuerySessionInformationA - which returns an ANSI (single-byte) buffer that
+    // Marshal.PtrToStringUni (below) would then misread as UTF-16, corrupting every username. See
+    // NativeMethods.cs's own WTSQuerySessionInformation declaration - this must stay in sync with it.
+    static string? QuerySessionInfoString(uint sessionId, int wtsInfoClass)
+    {
+        if (!NativeMethods.WTSQuerySessionInformation(IntPtr.Zero, sessionId, wtsInfoClass, out IntPtr buffer, out _))
+            return null;
+
+        try
+        {
+            return Marshal.PtrToStringUni(buffer);
+        }
+        finally
+        {
+            NativeMethods.WTSFreeMemory(buffer);
+        }
+    }
+
+    /// <summary>
     /// Kills any process at <paramref name="exePath"/> already running in
     /// <paramref name="sessionId"/> (excluding this process itself). Called both just before
     /// launching a fresh companion (so a restart replaces rather than accumulates) and from this

@@ -138,6 +138,7 @@ sealed class CommandDispatcher
                 case CommandType.Ping:           _control.Handle(Deserialize<PingCmd>(rawJson));           break;
                 case CommandType.Shutdown:       _control.Handle(Deserialize<ShutdownCmd>(rawJson));       break;
                 case CommandType.ResetAllPolicy: _control.Handle(Deserialize<ResetAllPolicyCmd>(rawJson)); break;
+                case CommandType.SessionUserGet: _control.Handle(Deserialize<SessionUserGetCmd>(rawJson)); break;
 
                 // ── Alert ─────────────────────────────────────────────────────
                 case CommandType.ShowAlert: _alert.Handle(Deserialize<ShowAlertCmd>(rawJson)); break;

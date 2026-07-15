@@ -406,6 +406,19 @@ uint? companionTargetSession = null;
 bool companionEverResolved   = false;
 bool companionLaunchOk       = true; // whether the LAST resolution for companionTargetSession actually succeeded
 
+// Independent dedup state for the session_user_changed emit below - deliberately NOT the same
+// state as companionTargetSession/companionLaunchOk above. "Did the console's logged-in user
+// change" is a different question from "does the companion need to move", and coupling them
+// caused two real bugs caught in review (see SESSION-USER-EVENT-DESIGN.md section 9): a failed
+// companion-launch retry re-running this whole function for the SAME session re-emitted the
+// identical user on every redundant WM_WTSSESSION_CHANGE notification (companionLaunchOk being
+// false defeated the OTHER guard below, which this dedup no longer depends on), and a session id
+// reused by a DIFFERENT user within one debounce window would have compared equal on session id
+// alone and silently skipped the emit entirely.
+uint? lastEmittedSessionId    = null;
+string? lastEmittedUsername   = null;
+bool sessionUserEverEmitted   = false;
+
 // Re-derives "what session should own clipboard/keyboard/relay duties right now" and acts on any
 // change since the last call - called once below and again from OnSessionChanged whenever Windows
 // reports a session transition (WM_WTSSESSION_CHANGE, e.g. Fast User Switching or a logout+
@@ -422,6 +435,20 @@ bool companionLaunchOk       = true; // whether the LAST resolution for companio
 void EnsureCompanionForActiveSession()
 {
     var activeSession = SessionActions.GetActiveConsoleSessionId();
+
+    // Resolved and (when it actually changed) emitted UNCONDITIONALLY, before the companion-
+    // ownership guard below - that guard's own early return must never suppress this. Passes the
+    // already-resolved activeSession straight into ResolveSessionUser rather than calling
+    // GetCurrentSessionUser (which would re-derive the active session a second time internally),
+    // so the emitted SessionId can never disagree with what the rest of this function acts on.
+    var (sessionUserOk, currentSessionId, currentUsername) = SessionActions.ResolveSessionUser(activeSession);
+    if (!sessionUserEverEmitted || currentSessionId != lastEmittedSessionId || currentUsername != lastEmittedUsername)
+    {
+        sessionUserEverEmitted = true;
+        lastEmittedSessionId   = currentSessionId;
+        lastEmittedUsername    = currentUsername;
+        EventEmitter.Emit(new SessionUserChangedEvent(null, sessionUserOk, currentSessionId, currentUsername));
+    }
 
     if (companionEverResolved && activeSession == companionTargetSession && companionLaunchOk)
         return; // nothing changed since the last resolution - cheap no-op for bursty notifications

@@ -1,3 +1,4 @@
+using DlpEndpointMonitor.Actions;
 using DlpEndpointMonitor.Commands;
 using DlpEndpointMonitor.Core;
 
@@ -67,4 +68,10 @@ sealed class WindowsControlHandler : IControlHandler
             _screenshotBlockPolicy.SetEnabled(false);
         },
         () => { _restoreDevices(); _clipboardReevaluate(); });
+
+    public void Handle(SessionUserGetCmd command)
+    {
+        var (ok, sessionId, username) = SessionActions.GetCurrentSessionUser();
+        EventEmitter.Emit(new SessionUserChangedEvent(command.Id, ok, sessionId, username));
+    }
 }

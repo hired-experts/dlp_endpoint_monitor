@@ -485,3 +485,18 @@ public record NetworkDeviceUnblockFailedEvent(string? Vid, string? Pid, string? 
     public string EventId { get; } = EventEmitter.NewEventId();
 }
 #endregion
+
+#region Session
+// Id is null when emitted proactively (startup, or a WM_WTSSESSION_CHANGE-driven session switch -
+// see Program.cs's EnsureCompanionForActiveSession) and populated when emitted in reply to a
+// session_user_get command. SessionId/Username are both null when no one is logged into the
+// console at all - see SessionActions.GetCurrentSessionUser for why that's never reported as
+// "SYSTEM"/Session 0 (Session 0 is never attachable to the console, interactive or not).
+[JsonDiscriminant(EventType.SessionUserChanged)]
+public record SessionUserChangedEvent(string? Id, bool Ok, uint? SessionId, string? Username) : IEvent
+{
+    public EventType Type => EventType.SessionUserChanged;
+    public string EventId { get; } = EventEmitter.NewEventId();
+    public long Ts { get; } = EventEmitter.Ts();
+}
+#endregion

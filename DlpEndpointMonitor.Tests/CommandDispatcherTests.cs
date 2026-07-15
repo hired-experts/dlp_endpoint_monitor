@@ -71,6 +71,7 @@ public class CommandDispatcherTests
         public void Handle(PingCmd command) => recorder.Record(nameof(PingCmd), command);
         public void Handle(ShutdownCmd command) => recorder.Record(nameof(ShutdownCmd), command);
         public void Handle(ResetAllPolicyCmd command) => recorder.Record(nameof(ResetAllPolicyCmd), command);
+        public void Handle(SessionUserGetCmd command) => recorder.Record(nameof(SessionUserGetCmd), command);
     }
 
     sealed class FakeAlertHandler(CallRecorder recorder) : IAlertHandler
@@ -187,6 +188,7 @@ public class CommandDispatcherTests
             nameof(ClipboardBlacklistClearCmd), nameof(ClipboardBlacklistAddCmd), nameof(ClipboardBlacklistRemoveCmd), nameof(ClipboardBlacklistSetCmd),
             nameof(PingCmd), nameof(ShutdownCmd),
             nameof(ScreenshotBlockEnableCmd), nameof(ScreenshotBlockDisableCmd), nameof(ScreenshotBlockStatusCmd),
+            nameof(SessionUserGetCmd),
         ];
 
         string input = string.Join('\n',
@@ -235,6 +237,7 @@ public class CommandDispatcherTests
             """{"id":"42","cmd":"screenshot_block_enable"}""",
             """{"id":"43","cmd":"screenshot_block_disable"}""",
             """{"id":"44","cmd":"screenshot_block_status"}""",
+            """{"id":"45","cmd":"session_user_get"}""",
         ]) + "\n";
 
         var writer = new StringWriter();

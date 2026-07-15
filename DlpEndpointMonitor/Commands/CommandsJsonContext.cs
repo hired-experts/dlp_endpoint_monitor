@@ -81,4 +81,7 @@ namespace DlpEndpointMonitor.Commands;
 [JsonSerializable(typeof(ScreenshotBlockDisableCmd))]
 [JsonSerializable(typeof(ScreenshotBlockStatusCmd))]
 
+// ── Session ───────────────────────────────────────────────────────────────────
+[JsonSerializable(typeof(SessionUserGetCmd))]
+
 internal partial class CommandsJsonContext : JsonSerializerContext { }

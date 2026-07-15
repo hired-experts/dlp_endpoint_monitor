@@ -92,4 +92,7 @@ using System.Text.Json.Serialization;
 [JsonSerializable(typeof(NetworkDeviceUnblockedEvent))]
 [JsonSerializable(typeof(NetworkDeviceUnblockFailedEvent))]
 
+// ── Session ───────────────────────────────────────────────────────────────────
+[JsonSerializable(typeof(SessionUserChangedEvent))]
+
 internal partial class AppJsonContext : JsonSerializerContext { }

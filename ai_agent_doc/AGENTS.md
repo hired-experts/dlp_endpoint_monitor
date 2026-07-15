@@ -13,6 +13,23 @@ Companion document:
 **One rule above all:** if this file disagrees with the actual code, the code is
 correct. Update this file to match.
 
+**⚠ This is a live production system, not a sandbox.** DlpEndpointMonitor is already deployed
+and running on real managed Windows endpoints today. Section 10's "sharp edges" are not
+hypothetical war stories - they are real incidents this binary caused in the field (bricked
+input devices, degraded Bluetooth links, silently unenforced policy) before being fixed. Keep
+that weight in mind for every change here:
+- Prefer the smallest correct change over a speculative refactor - a regression here has real
+  consequences on someone's actual machine, not just a failing test.
+- Never skip the validation gate (section 8.1) to save time, and never use `--no-verify` or
+  similar shortcuts.
+- Anything touching `Monitors/*`, `Handlers/Windows/*`, or a Win32-calling `Actions/*` method
+  cannot be fully proven by the automated test suite (see `ai_agent_doc/TEST-PLAN.md` section 1) -
+  say so explicitly rather than reporting it as verified, and flag it for a real manual pass
+  before it's considered done.
+- Treat anything that affects the live service/MSI itself (install, uninstall, upgrade, restart,
+  or a change to deployment/service configuration) as high-blast-radius - confirm with the user
+  before taking any action beyond code changes.
+
 ---
 
 ## 1. What this project does
@@ -171,7 +188,12 @@ DlpEndpointMonitor/
                               proven pattern: GetActiveConsoleSessionId / IsRunningInSession /
                               LaunchIntoSession (WTSQueryUserToken+CreateProcessAsUser into the
                               interactive session); used by Program.cs to launch the clipboard
-                              companion, same P/Invoke as AlertActions, see section 10
+                              companion, same P/Invoke as AlertActions, see section 10.
+                              GetCurrentSessionUser (WTSQuerySessionInformation) resolves
+                              "DOMAIN\User" for whoever owns the active console session right
+                              now - the single function both Program.cs's proactive
+                              session_user_changed emit and the session_user_get command call,
+                              see section 10
   Handlers/
     IHandlers.cs              one interface per command family (IClipboardHandler, IUsbStorageHandler,
                               IUsbDeviceHandler, IUsbProtectionHandler, IClipboardProtectionHandler,
@@ -209,9 +231,12 @@ DlpEndpointMonitor.AlertHost/   companion WPF app (net10.0-windows, OutputType W
                              startup, --initial-alert arg parsing), AlertQueue.cs (coalesce/cap
                              dispatch), PipeTransport.cs (newline-JSON named-pipe server/client),
                              RichTextParser.cs (the closed `<strong>/<b>/<em>/<i>/<br>` inline-tag
-                             allowlist), Resources/Colors.xaml (severity/surface brushes),
-                             Controls/AlertBox.xaml(.cs) (the one shared rounded-box+header-band
-                             control), Windows/ToastWindow|FullScreenWindow.xaml(.cs).
+                             allowlist), MonitorHelper.cs (EnumDisplayMonitors/GetMonitorInfo
+                             P/Invoke - one Toast/FullScreen instance per connected monitor, see
+                             AGENTS.md section 10), Resources/Colors.xaml (severity/surface
+                             brushes), Controls/AlertBox.xaml(.cs) (the one shared
+                             rounded-box+header-band control), Windows/ToastWindow|
+                             FullScreenWindow.xaml(.cs).
                              See ai_agent_doc/PROJECT.md section 11 for the full delivery-mechanism
                              design (why a second process, mutex/pipe singleton, session-crossing
                              launch, queueing policy, visual design, color-token provenance) and
@@ -315,15 +340,25 @@ category, add the GUID mapping there, not inline in a monitor.
 - **Duplicate device entries are rejected** - `UsbDeviceList.SameDevice` compares vid/pid/
   serial/mac/kind case-insensitively (label is cosmetic and ignored); `Add`/`Set` dedupe
   against this before persisting.
-- **A composite USB device is judged as ONE physical device, not per interface.** Windows
-  enumerates one physical device (a keyboard, most commonly) as several separate interfaces,
-  each possibly resolving to a different `DeviceKind`. `UsbMonitor.IsGroupCompliant` decides
-  compliance for the whole `GroupId`: allowed if ANY sibling interface matches the whitelist,
-  blocked if ANY sibling matches the blacklist. Never make a block/allow decision from a
-  single interface's kind alone without checking this - a mismatched sibling interface can
-  otherwise escalate to disabling the shared composite parent, taking down a device that WAS
-  correctly whitelisted (this was a real shipped bug: `{kind: keyboard}` alone blocked the
-  keyboard itself). See PROJECT.md section 5.2/5.4.
+- **A composite USB device is judged as ONE physical device, not per interface - but each
+  interface's own identity must independently satisfy policy.** Windows enumerates one
+  physical device (a keyboard, most commonly) as several separate interfaces, each possibly
+  resolving to a different `DeviceKind`. `UsbMonitor.IsIndividuallyCompliant` (whitelist-allows
+  AND !blacklist-blocks, evaluated against THIS interface's own vid/pid/serial/kind) is the
+  sole compliance check - a sibling interface's own compliance is NEVER a reason to allow a
+  different, non-compliant interface. It only ever downgrades that other interface's own block
+  from a full escalation (composite-parent disable, then eject) to a leaf-only disable, via the
+  pure, unit-tested `UsbMonitor.DecideGroupBlock` (`Allow`/`LeafOnly`/`FullEscalation`), so a
+  compliant sibling is never collaterally taken down by another interface's escalation.
+  `IsRecordCompliant` mirrors the same individual-first check on the restore path. Never make a
+  block/allow decision from a single interface's kind alone without going through these - two
+  real shipped bugs came from getting this wrong in each direction: escalating a mismatched
+  sibling's block to the shared parent once disabled a correctly-whitelisted keyboard (via its
+  own `Hid`-kind sibling), and an earlier "any sibling compliant ⇒ whole group compliant"
+  version of this same check let a whitelisted keyboard interface's compliance keep an
+  unrelated, non-compliant storage sibling on the SAME composite device fully working and
+  auto-restorable (see `ai_agent_doc/USB-WHITELIST-BYPASS-FIX-PLAN.md` Finding A). See
+  PROJECT.md section 5.2/5.4.
 - **Whitelist mode fails closed on anything unclassifiable** - a device with an unrecognized
   interface GUID (`DeviceKind.Unknown`) or an unparseable path is still evaluated against
   policy (and therefore blocked under whitelist, since it won't match a specific entry)
@@ -486,14 +521,11 @@ what is and is not covered and why.
   routed through this same check (not just `StrictInputKinds`) - if you add a new
   block/evaluate path for any device kind, route it through `IsProtectedInternal` or you can
   brick input, or blindly disable an unrecognized-but-essential internal device.
-- **Never decide block/allow from a single USB interface's kind in isolation.** A composite
-  device (a keyboard, most commonly) enumerates as multiple interfaces that can resolve to
-  different `DeviceKind`s. Always run the decision through `UsbMonitor.IsGroupCompliant`
-  (checks every sibling interface sharing the same `GroupId`) before blocking, and through
-  `IsRecordCompliant` when restoring - never trust one interface's kind, or one persisted
-  record's stale kind, in isolation. Getting this wrong was a real shipped bug: a
-  `{kind: keyboard}`-only whitelist entry ended up disabling the whole physical keyboard via
-  a sibling `Hid`-kind interface's collateral block.
+- **Never decide block/allow from a single USB interface's kind in isolation, and never let a
+  sibling's compliance allow a DIFFERENT non-compliant interface either** - see section 7's
+  "composite USB device" bullet for the full `IsIndividuallyCompliant`/`DecideGroupBlock`/
+  `IsRecordCompliant` mechanism and the two real shipped bugs (one per direction) this
+  protects against.
 - **Bluetooth-backed HID devices are unpaired at the Bluetooth device node's own MAC, never
   the HID leaf, and never the shared radio.** `UsbActions.GetBluetoothDeviceNode` finds the
   right node; `BluetoothActions.ParseMacFromPath` extracts that node's MAC, which is then
@@ -1017,10 +1049,11 @@ what is and is not covered and why.
   added for the built-in-keyboard/adapter safety refusals in `UsbMonitor`/`NetworkMonitor` - those
   still report whichever of the two policy reasons triggered the block ATTEMPT; `Error` already
   explains the refusal itself (e.g. `"protected internal input device..."`). For USB specifically,
-  `Reason` is RE-DERIVED inside `UsbMonitor.BlockDevice` from the live group-compliance re-check
-  (`IsGroupCompliant`'s `groupBlocked` out-param) when a composite group applies, rather than trusting
-  the caller's earlier single-interface guess - same never-trust-a-single-interface-in-isolation
-  principle this file already documents elsewhere. `DisplayMonitor.BlockNonCompliant`'s per-monitor
+  `Reason` is RE-DERIVED inside `UsbMonitor.BlockDevice` from a live per-interface blacklist
+  re-check (`_blacklist.IsBlocked` against the interface's own identity, plus its siblings' when
+  `DecideGroupBlock` returns `FullEscalation`) rather than trusting the caller's earlier
+  single-interface guess - same never-trust-a-single-interface-in-isolation principle this file
+  already documents elsewhere. `DisplayMonitor.BlockNonCompliant`'s per-monitor
   loop carries each monitor's own `Reason` alongside it (a list of `(ParsedDevice, string reason)`
   tuples), not one shared value applied to the whole non-compliant batch. No new NuGet dependency, no
   wire-shape change beyond the one new field per record - `Vid`/`Pid`/`Mac`/`InstanceId`/etc. and
@@ -1283,6 +1316,60 @@ what is and is not covered and why.
   `TryClaimNewArrival(instanceId)` - both paths write into the same lock-guarded set before
   emitting, so a composite device's storage child interface that both paths could independently
   notice is only ever reported once, whichever path claims the instance ID first.
+- **`AlertHost`'s Toast/FullScreen windows now show on every connected monitor, not just the
+  primary one - a deliberate product decision, not a bug fix.** Both window types previously used
+  WPF's `SystemParameters.PrimaryScreenWidth/Height`/`WorkArea`, which only ever reflect the
+  primary monitor - on a multi-monitor machine, an alert (especially a blocking FullScreen one)
+  could go completely unseen by a user looking at a secondary display.
+  `DlpEndpointMonitor.AlertHost/MonitorHelper.cs` enumerates every monitor via
+  `EnumDisplayMonitors`/`GetMonitorInfo` P/Invoke - **not**
+  `System.Windows.Forms.Screen.AllScreens`, which was tried first and rejected: adding
+  `UseWindowsForms` to pull in that one API drags in a global `System.Windows.Forms` using that
+  collides project-wide with WPF's own `Application`/`Brush`/`UserControl` types (confirmed via a
+  real CS0104 ambiguous-reference build break across unrelated files). `App.ShowAlertWindow`
+  (`App.xaml.cs`) now constructs one `FullScreenWindow`/`ToastWindow` instance per monitor
+  (constructors take a caller-supplied `Rect` instead of reading `SystemParameters` themselves) and
+  `ShowAllAndWaitForDismiss` shows all of them at once via `Show()` (not `ShowDialog()` - there is
+  no single window left to be modal against), manually pumping a `DispatcherFrame` - the same
+  mechanism `ShowDialog` uses internally - until every instance has closed. Dismissing ANY one
+  instance (click, close button, or its own timer) immediately closes every other instance for the
+  same alert, since they all represent one single alert being acknowledged, not independent ones.
+  `AlertQueue`'s "never two windows visible at once" invariant is now "never two *alerts* on screen
+  at once" - one alert can legitimately occupy several windows simultaneously. Since this app runs
+  without per-monitor DPI awareness (same as its pre-existing `SystemParameters.Primary*` usage),
+  `MonitorHelper` converts every monitor's raw pixel rect through ONE shared scale factor derived
+  from the primary monitor (`SystemParameters.PrimaryScreenWidth` vs. the primary monitor's raw
+  pixel width) rather than querying each monitor's own DPI - this matches how Windows actually
+  renders a non-per-monitor-DPI-aware app across differently-scaled monitors, not true independent
+  per-monitor scaling. Falls back to the single pre-existing primary-only rect if
+  `EnumDisplayMonitors` itself returns zero monitors (should not happen on a real Windows machine,
+  but fails safe to old behavior rather than showing no alert anywhere).
+- **`session_user_changed`/`session_user_get`: two real bugs caught by a twice-reviewed-with-Opus
+  design pass before shipping (`ai_agent_doc/SESSION-USER-EVENT-DESIGN.md`), both now fixed.**
+  (1) `NativeMethods.WTSQuerySessionInformation`'s original `[DllImport]` had no `CharSet`, so it
+  silently bound to the ANSI `...A` variant while `SessionActions.QuerySessionInfoString` read the
+  result with `Marshal.PtrToStringUni` (UTF-16) - every real username would have come back
+  corrupted the moment this shipped to a real machine. Fixed with an explicit
+  `CharSet = CharSet.Unicode`, matching every other string-returning P/Invoke in this file.
+  (2) The proactive emit was originally gated behind `EnsureCompanionForActiveSession`'s
+  companion-ownership guard (`activeSession == companionTargetSession && companionLaunchOk`) -
+  the wrong question, since "did the logged-in user change" is independent of "does the companion
+  need to move." That coupling caused a failed companion-launch retry to re-emit the SAME user on
+  every redundant `WM_WTSSESSION_CHANGE` notification (the guard's `companionLaunchOk` check kept
+  failing, so its early return never fired), and could have silently SKIPPED an emit if a session
+  id got reused by a DIFFERENT user within one 800ms debounce window (the guard compares session
+  ids only). Fixed by giving the emit its own independent dedup state
+  (`lastEmittedSessionId`/`lastEmittedUsername`), resolved and checked unconditionally before the
+  companion guard's early return, keyed on the actual `(SessionId, Username)` tuple rather than
+  companion launch state. `SessionActions.ResolveSessionUser(uint? sessionId)` takes an
+  already-resolved session id directly (used by `EnsureCompanionForActiveSession`, which already
+  has one) rather than re-deriving it via `GetActiveConsoleSessionId()` a second time the way
+  `GetCurrentSessionUser()` (used by the `session_user_get` command, which has no session already
+  in hand) does - avoids a narrow, self-correcting race where the two calls could disagree.
+  `SessionActions.FormatSessionUser(domain, username)` is the pure "DOMAIN\User" combination rule,
+  factored out and unit-tested (`SessionActionsTests.cs`) the same way `UsbMonitor.DecideGroupBlock`
+  and `StartupConflictResolver.Resolve` were - an empty/null username reports null regardless of
+  what domain came back (logon screen / no interactive user resolved yet), never the reverse.
 
 ---
 
@@ -1297,7 +1384,7 @@ what is and is not covered and why.
 | How a stdin line becomes a handler call | `Core/CommandDispatcher.cs` |
 | How whitelist/blacklist enable/disable/mutate interact | `Handlers/Windows/WindowsUsbProtectionHandler.cs` |
 | How a device actually gets blocked/unblocked | `Monitors/UsbMonitor.cs` (`BlockDevice`, `RestoreCompliant`), `Actions/UsbActions.cs` |
-| How a composite device's siblings are judged together | `Monitors/UsbMonitor.cs` (`IsGroupCompliant`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
+| How a composite device's siblings are judged together | `Monitors/UsbMonitor.cs` (`IsIndividuallyCompliant`, `DecideGroupBlock`, `IsRecordCompliant`), `Actions/UsbActions.cs` (`EnumerateGroupSiblings`) |
 | How Bluetooth devices are matched/blocked/restored | `Monitors/BluetoothMonitor.cs`, `Actions/BluetoothActions.cs` (`RemovePairing`) |
 | Why a BLE unpair tries multiple candidate addresses, why it can still fail, and the disable fallback | `Actions/UsbActions.cs` (`GetBluetoothPairingCandidates`), `Actions/BluetoothActions.cs` (`RemovePairingAny`, `TryCandidatesInOrder`), `Monitors/UsbMonitor.cs` (`ResolveBluetoothBlock`), `ai_agent_doc/PROJECT.md` section 5.5 |
 | What `SourceEventId` means for clipboard vs. USB, and why they're different lifetimes under one field name | `Core/EventEmitter.cs` (`ClipboardContentBlockedEvent`, `UsbDeviceConnectedEvent` etc.), `Monitors/UsbMonitor.cs` (`ResolveGroupAnchor`, `ResolveGroupAnchorCore`, `ReleaseGroupAnchorIfLastSibling`), section 10 |
@@ -1313,6 +1400,7 @@ what is and is not covered and why.
 | The `--schema` JSON-Schema export | `Core/SchemaExporter.cs` |
 | How a UI alert reaches the interactive session, and why | `Actions/AlertActions.cs`, `DlpEndpointMonitor.AlertHost/App.xaml.cs`, `ai_agent_doc/PROJECT.md` section 11 |
 | How the primary reacts to a live Windows session change (Fast User Switching, logout+different-user-login) | `Core/MessageWindow.cs` (`SessionChanged`, `WM_WTSSESSION_CHANGE`), `Program.cs` (`EnsureCompanionForActiveSession`, `OnSessionChanged`), section 10 |
+| How the current console user is reported (`session_user_changed`/`session_user_get`), and the two bugs a design review caught before it shipped | `Actions/SessionActions.cs` (`GetCurrentSessionUser`, `ResolveSessionUser`, `FormatSessionUser`), `Program.cs` (`EnsureCompanionForActiveSession`'s own dedup state), `ai_agent_doc/SESSION-USER-EVENT-DESIGN.md`, section 10 |
 | How screenshot-shortcut blocking works and its scope limits | `Monitors/KeyboardHook.cs`, `ai_agent_doc/PROJECT.md` section 5.11 |
 | Deep design, protocol tables, principles, roadmap | `ai_agent_doc/PROJECT.md` |
 | The validation gate to run before a commit | AGENTS.md section 8.1 |

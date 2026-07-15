@@ -187,3 +187,11 @@ record ScreenshotBlockDisableCmd(string? Id) : ICommand;
 [JsonDiscriminant(CommandType.ScreenshotBlockStatus)]
 [EmitsEvent(EventType.ScreenshotBlockStatus)]
 record ScreenshotBlockStatusCmd(string? Id) : ICommand;
+
+// ── Session ────────────────────────────────────────────────────────────────────
+// On-demand counterpart to the proactive session_user_changed event Program.cs emits at startup
+// and on every session change - a fresh live query (SessionActions.GetCurrentSessionUser), not a
+// cached value, same as every other *_status/*_get command in this file.
+[JsonDiscriminant(CommandType.SessionUserGet)]
+[EmitsEvent(EventType.SessionUserChanged)]
+record SessionUserGetCmd(string? Id) : ICommand;
